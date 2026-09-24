@@ -135,6 +135,7 @@ plugins:
 以下问题尚未定论，欢迎在 [Issues](https://github.com/prolet1966/QQ-Agent-for-Linux/issues) 中讨论：
 
 1. 实现语言未定。需权衡 Linux 部署友好度、开发效率与生态成熟度。
+   - 候选考量：Node.js（与 SnowLuma 同栈，可复用 `@snowluma/sdk`，但需常驻运行环境）、Go（单二进制、交叉编译、systemd 友好）、Rust（资源占用最低，开发成本较高）、Python（生态丰富，部署与性能较弱）。
 2. `group:{group_id}:user:{user_id}` 这类细粒度会话键是否默认开启，还是交由插件决定。
 3. 插件热重载的状态迁移策略：卸载时如何处理插件遗留的会话数据。
 4. 是否需要内置轻量 Web 管理面板，还是完全依赖配置文件。
