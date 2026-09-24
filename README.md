@@ -3,6 +3,8 @@
 > 一个面向 Linux 平台设计与优化的 QQ 机器人框架，基于 **OneBot v11** 协议，对接 **[SnowLuma](https://github.com/SnowLuma/SnowLuma)** 协议端。
 > **A Linux-first QQ bot framework** built on **OneBot v11**, bridging to **SnowLuma**.
 
+[简体中文](README.md) · **English**
+
 [![Platform](https://img.shields.io/badge/platform-Linux-blue)](#)
 [![Protocol](https://img.shields.io/badge/OneBot-v11-4b8bbe)](#-协议与协议端)
 [![SnowLuma](https://img.shields.io/badge/protocol--end-SnowLuma-8aadf4)](https://github.com/SnowLuma/SnowLuma)
@@ -172,6 +174,7 @@ cd QQ-Agent-for-Linux && ./build.sh
 | 文档 | 内容 |
 | --- | --- |
 | [架构设计](docs/architecture.md) | 分层职责、通信链路、会话模型、配置草案、待决问题 |
+| [决策记录](docs/decisions.md) | 已做的决策及其理由、被否决的方案、尚待拍板的问题 |
 | [SnowLuma 部署指南](docs/snowluma-setup.md) | 协议端安装、QQ 扫码登录、OneBot 连接配置与验证 |
 | [贡献指南](CONTRIBUTING.md) | 当前阶段能做什么、Issue 与提交规范、行为准则 |
 
