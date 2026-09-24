@@ -7,7 +7,7 @@
 [![Protocol](https://img.shields.io/badge/OneBot-v11-4b8bbe)](#-协议与协议端)
 [![SnowLuma](https://img.shields.io/badge/protocol--end-SnowLuma-8aadf4)](https://github.com/SnowLuma/SnowLuma)
 [![Status](https://img.shields.io/badge/status-early%20development-orange)](#-项目状态)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ---
 
@@ -167,6 +167,14 @@ git clone https://github.com/prolet1966/QQ-Agent-for-Linux.git
 cd QQ-Agent-for-Linux && ./build.sh
 ```
 
+## 📚 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [架构设计](docs/architecture.md) | 分层职责、通信链路、会话模型、配置草案、待决问题 |
+| [SnowLuma 部署指南](docs/snowluma-setup.md) | 协议端安装、QQ 扫码登录、OneBot 连接配置与验证 |
+| [贡献指南](CONTRIBUTING.md) | 当前阶段能做什么、Issue 与提交规范、行为准则 |
+
 ## 🤝 参与贡献
 
 项目还在起步阶段，但现在正是**讨论与设计最容易产生价值**的时候。
@@ -183,9 +191,11 @@ cd QQ-Agent-for-Linux && ./build.sh
 
 ## 📄 许可证
 
-本项目自身代码采用 [MIT License](LICENSE)。
+本项目自身代码采用 [Apache License 2.0](LICENSE)。
 
-> **注意**：本仓库的 MIT 许可**不覆盖** [SnowLuma](https://github.com/SnowLuma/SnowLuma) 或任何第三方协议端。SnowLuma 采用源码可见非商业许可，与本项目的许可相互独立，请分别遵守。
+选用 Apache-2.0 而非 MIT，是因为本项目定位为**框架**：Apache-2.0 在第 3 条中明确授予专利许可，并含专利 retaliation 条款，对企业与商业部署场景更清晰。它同样是宽松许可，允许自由使用、修改与再分发。
+
+> **注意**：本仓库的 Apache-2.0 许可**不覆盖** [SnowLuma](https://github.com/SnowLuma/SnowLuma) 或任何第三方协议端。SnowLuma 采用**源码可见非商业许可（non-commercial）**，与本项目的许可相互独立，请分别遵守——**更换本项目的许可证不会改变 SnowLuma 对你的约束**。
 
 ---
 
