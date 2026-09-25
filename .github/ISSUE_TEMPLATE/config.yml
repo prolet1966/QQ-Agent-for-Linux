@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SnowLuma 协议端问题
+    url: https://github.com/SnowLuma/SnowLuma/issues
+    about: QQ 登录、协议端崩溃、WebUI 异常等问题请向 SnowLuma 反馈
+  - name: OneBot v11 标准
+    url: https://github.com/botuniverse/onebot-11
+    about: 协议标准本身的疑问

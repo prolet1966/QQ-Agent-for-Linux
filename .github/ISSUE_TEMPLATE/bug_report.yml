@@ -1,0 +1,70 @@
+name: 问题反馈
+description: 报告一个 bug 或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。**提交前请先搜索已有 issue**，避免重复。
+
+        > 本项目源码尚未发布。若问题与 SnowLuma 协议端本身有关，请改去 [SnowLuma Issues](https://github.com/SnowLuma/SnowLuma/issues) 反馈。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么？你期望发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请具体到可以直接照着做的程度。
+      placeholder: |
+        1. 配置 ...
+        2. 执行 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: 发行版与版本
+      placeholder: 例如 Ubuntu 24.04 LTS / Debian 12 / Arch
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: 架构
+      options:
+        - x86_64 / amd64
+        - arm64 / aarch64
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: snowluma-version
+    attributes:
+      label: SnowLuma 版本
+      placeholder: 例如 v1.2.3
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 请**先剔除 token、QQ 号、IP 等敏感信息**。
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我已搜索过已有 issue，确认不是重复
+          required: true
+        - label: 我已剔除日志中的敏感信息
+          required: true
