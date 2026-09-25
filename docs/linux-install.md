@@ -4,8 +4,12 @@
 > 本文档基于**源码级移植改造**编写，改造点见 `docs/linux-port-findings.md`，
 > 交付与验证结果见 `docs/linux-delivery-report.md`。
 >
-> **已实测验证**：`.deb` 在 Ubuntu 26.04（WSL2）真机安装并跑通冒烟测试 25/25，
-> `.rpm` 等价验证 18/18，AppImage 7/7。文件名与大小见下方「安装」一节。
+> **已实测验证**：
+> `.deb` 在真实 Ubuntu 26.04.1 虚拟机上 **19/19**（另在 WSL2 上 25/25）；
+> **`.rpm` 在真实 Fedora 44 上 41 项 0 失败**
+> （依赖解析 23/23 + GUI/XDG 11/11 + 卸载保留数据 7/7）；
+> AppImage 在真实 Ubuntu 上 18/18（另在 WSL 上 7/7）。
+> 文件名与大小见下方「安装」一节。
 
 ---
 
@@ -57,6 +61,15 @@ sudo apt install -y libnss3 libgtk-3-0 libasound2t64 libgbm1 \
 ```bash
 sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm
 ```
+
+依赖会被自动装好，**不需要手动补**。本包声明的 8 个依赖
+（`alsa-lib`、`gtk3`、`libXScrnSaver`、`libdrm`、`libxkbcommon`、
+`mesa-libgbm`、`nss`、`xdg-utils`）已在**真实 Fedora 44** 上实测全部解析成功，
+`dnf` 会自动拉入 121 个依赖包。
+
+> 这一条值得强调：electron-builder 默认照抄 Debian 系依赖名，而 RPM 系叫法不同。
+> 依赖名写错时 `rpm -qpR` 照样能把名字打印出来，但 `dnf install` 会直接失败 ——
+> **只看元数据看不出来，必须真机跑一次 dnf**。本包已通过。
 
 ### 任意发行版（AppImage）
 

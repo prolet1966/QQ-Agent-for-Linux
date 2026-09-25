@@ -150,24 +150,101 @@
 | XDG | 数据目录建于 XDG 位置、不在安装目录内 |
 | 卸载 | 卸载成功、**用户数据未被删除** |
 
-### 4.3 .rpm 冒烟：18/18
+### 4.3 .rpm 真机安装冒烟：41/41 项 0 失败
 
-WSL 是 Ubuntu，无法真正 `rpm -i`（会把文件塞进 dpkg 系统且依赖解析混乱）。
-采用等价验证，**并如实记录其局限**：
+**这一节此前是整个项目最大的缺口，2026-09-25 已补齐。**
 
-- `rpm2cpio` 解出完整文件树，核对路径布局与内容
-- **与 .deb 逐条对照**：两包 `app.asar`/`snowluma` 关键条目均为 **44 条且完全一致**
-- 用解出的文件树**真实启动一次**，验证运行行为与数据目录落点
+#### 走过的弯路（记录在此，避免重蹈）
 
-> ⚠️ **局限（不假装等价）**：未经 rpm 数据库注册，因此
-> ① 无法验证 pre/post 脚本在 rpm 体系下的执行；② 未经过 rpm 依赖解析
-> （依赖名已用 `rpm -qpR` 单独核对，含 `xdg-utils` 等 9 项）。
-> 若需要严格验证，应在 RHEL/Fedora 系真机上装一次。
+原计划是装一台 Fedora 虚拟机做真机测试。这条路连续撞上五道墙：
 
-### 4.4 AppImage 冒烟：7/7
+1. **kickstart 装不上**。netinst 上只有安装器没有软件包，最初的 `cdrom` 安装源是逻辑矛盾；
+   换成网络源后，安装器停在**交互式** INSTALLATION SUMMARY，
+   `Software Selection` 显红 `Warning checking software selection`，
+   磁盘始终 3.8 MB、无任何写入 —— 完全无人值守的 ks 安装不会停在摘要页，
+   说明 kickstart 根本没被读到。
+2. **看不了屏幕**。`vmrun captureScreen` 要求先 `VixVM_LoginInGuest`（匿名 guest 操作被拒）。
+3. **敲不进键盘**。`vmcli MKS sendKeySequence` / `sendKeyEvent` 全部静默无效
+   （exit=0 但屏幕哈希一像素不变），进不了 TTY 读 anaconda 日志，也点不动摘要页按钮。
+4. **VNC 连不上**。VMware 的 VNC 只提供安全类型 2，明文口令与 vmx 里
+   `RemoteDisplay.vnc.key` 两种取 key 方式都被服务端直接断开。
+5. **决定性证据**：截图在 60 秒乃至 20 分钟跨度上**逐像素完全一致**，
+   而 Anaconda 界面右上角带实时时钟 —— **guest 已冻死**，
+   `captureScreenshot` 拿到的是冻结帧。不是"看不到"，是那台机器真的卡住了。
 
-`--appimage-extract-and-run` 启动，退出码 **124**（被 timeout 杀掉 = 进程一直活着），
-数据目录正常建于 XDG 位置。
+结论：那条路已证明走不通，**及时止损比继续投入更重要**。
+
+#### 最终方案：官方 Fedora WSL 镜像
+
+改用 Fedora 官方发布的 `Fedora-WSL-Base-44-1.7.x86_64.wsl`（155.3 MB），
+SHA256 `2e5b153ba4b639952bf546be577fc19b832fe8944caa7de342b32f10da7d319a`
+与官方 `Fedora-Container-44-1.7-x86_64-CHECKSUM` **核对一致**，
+`wsl --import` 导入即得到真实 Fedora 44 用户态：rpm 6.0.1、glibc 2.43、dnf5。
+
+| 脚本 | 项目 | 结果 |
+| --- | --- | --- |
+| `fedora-01-rpm-smoke.sh` | dnf 依赖解析 → 安装 → rpm 数据库 → 卸载 | **23/23** |
+| `fedora-03-gui-xdg.sh` | 普通用户 + Xvfb 启动 → XDG 落点 → 技能加载 | **11/11** |
+| `fedora-04-uninstall-keepdata.sh` | 卸载后用户数据保留 | **7/7** |
+
+#### 最关键的一条：依赖名在 Fedora 上全部解析成功
+
+electron-builder 默认照抄 Debian 系依赖名，而 RPM 系叫法不同。
+**依赖名写错时 `rpm -qpR` 照样能把名字打印出来，但 `dnf install` 会直接失败**
+—— 只看元数据完全看不出来。
+
+实测包声明的 8 个依赖全部被 Fedora 仓库解析并自动装上：
+
+```
+alsa-lib  gtk3  libXScrnSaver  libdrm  libxkbcommon  mesa-libgbm  nss  xdg-utils
+```
+
+121 个文件登记进 rpm 数据库，`rpm -V` 校验通过，卸载后 **0 个文件残留**。
+
+#### GUI 与 XDG（真实普通用户下）
+
+以 `qqtest` 用户在 Xvfb 下启动，**存活满 60 秒未崩溃**（退出码 124 = 被 timeout 杀），
+数据目录落在 `/home/qqtest/.local/share/qq-agent`：
+
+- 属主为 `qqtest`（不是 root），且不在 `/opt` 安装目录内
+- 生成 `config.json`、`sessions/`、`memory-v2/`、`logs/`、`threads/` 等
+- **加载出 19 条技能日志**，含自己魔改的 `affinity`、`body-state`、`meme-engine`、
+  `threads`、`proactive-chat`、`wake-policy` 等
+
+卸载后安装文件全部清除，用户数据 8 个文件**完整保留**、属主未变
+（`/opt/QQ Agent` 会留下 9 个**空目录骨架**，这是 rpm 对共享路径的正常语义，
+0 个文件残留）。
+
+#### ⚠️ 能力边界（不冒充"真机全项通过"）
+
+WSL 跑的是**微软内核**，不是 Fedora 自带内核。因此：
+
+- ✅ **能验**：rpm/dnf 依赖解析与事务、安装路径与权限、rpm 数据库注册、
+  `%post` 脚本、卸载与残留、文件校验、XDG 落点、技能加载
+- ❌ **不能验**：Fedora 内核相关的运行时行为、真实图形栈与硬件
+
+GUI 启动已在**真实 Ubuntu 26.04.1 虚拟机**上覆盖（`vm-02-smoke.sh`），
+应用二进制在两种包中完全相同。
+
+### 4.4 .deb 在真实 Ubuntu 虚拟机上的冒烟：19/19
+
+前面的 4.2 是 WSL 侧验证。为进一步确认，另开一台**真实 Ubuntu 26.04.1 虚拟机**
+（内核 7.0.0，4 核 / 3350 MB，11 GB 空闲，免密 sudo）复测：
+
+- 通过 SSH 传入 `.deb`，**传输后先核对 SHA256**，再 `dpkg -i` 安装
+- 覆盖安装、文件布局、SnowLuma 解包与自带 node、Electron、XDG 落点、卸载保留数据
+- 该机**没有出现 WSLg 的 GPU 报错**（印证 5.1 的判断：那是 WSLg 环境问题，不是移植缺陷）
+
+> 教训：传输脚本曾对**二进制**做行尾处理，把 `.deb` 损坏
+> （SHA256 从 `023ebec3…` 变成 `70d3dead…`），只因为校验了哈希才发现。
+> **所以「传输后必须核对 SHA256」是硬规则**，不是可选项。
+
+### 4.5 AppImage 冒烟：7/7（WSL）+ 18/18（真实 Ubuntu 虚拟机）
+
+真实 Ubuntu 虚拟机上另测 18/18。踩过一次坑：最初把 `.deb` 的路径布局
+（`/opt/QQ Agent/resources/...`）套到 AppImage 上，导致 4 项**误报失败**
+—— AppImage 把 `resources/` 放在 squashfs 根。
+**断言必须按实际结构写，不能照搬另一种包的布局。**
 
 ### 4.5 插件与技能加载：70 / 0
 
@@ -241,7 +318,32 @@ FATAL:gpu_data_manager_impl_private.cc(423) GPU process isn't usable. Goodbye.
 **所有用例的数据目录都正常建出**，后端（协议端接入、存储、技能加载）不受影响。
 在真实 Linux 桌面或纯服务器上表现会不同，需要真机复核。
 
-### 5.2 AppImage 需要 libfuse2
+> **后续实证**：在真实 Ubuntu 26.04.1 虚拟机上复测，**没有出现该报错**
+> （见 4.4）。这印证了「WSLg 环境问题、非移植缺陷」的判断。
+
+### 5.2 ★ 测试脚本自身的 bug 比包的问题更常见
+
+Fedora 验证第一次跑出 3 项失败，逐条查下来**全部是测试脚本的问题**，与包无关。
+若不查清就改包，会把好包改坏：
+
+| 现象 | 真实原因 |
+| --- | --- |
+| `[: 10: integer expected` | `$(rpm -ql … \| wc -l \|\| echo 0)` 在输出带换行时拼成 `"1\n0"` |
+| `ENVNOTES: unbound variable` | `declare -a A B` 一行声明多个数组名，在 bash 5.3.9 下展开报 unbound（改成逐个 `A=()` 并配 `${A[@]+…}` 兜底） |
+| 「卸载后残留 1 条」 | `rpm -ql <未安装的包>` 输出为空，但空输出末尾的换行被 `wc -l` 数成 1 |
+| 「安装目录未移除」 | 断言按「目录必须消失」写，但 rpm 对共享路径只删文件、保留空目录骨架 |
+| 以 root 判定 XDG 失败 | root 家目录与边界行为不具代表性；WSL 无 `/run/user/0` 会话总线 |
+
+另外两类也踩过：
+
+- **AppImage 断言套用 .deb 布局** → 4 项误报失败（见 4.5）
+- **传输脚本对二进制做行尾处理** → 直接损坏 `.deb`，只因校验哈希才发现（见 4.4）
+
+**规则**：报出失败时，先证明是包的问题，再动包。
+**并且**：把失败项分类成「包的问题」与「环境前提缺失」，后者不该计成失败 ——
+否则测试报告会失去可信度。
+
+### 5.3 AppImage 需要 libfuse2
 
 Ubuntu 24.04+ 默认只装 libfuse3，而 AppImage 仍依赖 libfuse2，直接双击会报：
 ```
@@ -251,7 +353,7 @@ dlopen(): error loading libfuse.so.2
 **这是 AppImage 格式的通用特性，与本项目无关**（任何 AppImage 都如此）。
 已在安装文档中写明。
 
-### 5.3 配置里的 Windows 路径残留
+### 5.4 配置里的 Windows 路径残留
 
 从 Windows 迁移的 `config.json` 中仍有绝对路径，会导致对应技能静默失效：
 
@@ -265,7 +367,7 @@ dlopen(): error loading libfuse.so.2
 **这些是用户数据，不是程序缺陷**，无法在打包阶段修掉（打包已排除 `data/`）。
 已提供覆盖片段与操作说明。
 
-### 5.4 affinity 档案需手动迁移
+### 5.5 affinity 档案需手动迁移
 
 启动日志会提示：
 ```
