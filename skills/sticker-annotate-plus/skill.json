@@ -1,0 +1,13 @@
+{
+  "id": "sticker-annotate-plus",
+  "name": "批量补表情备注",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "一次把 N 张「还没备注」的收藏表情图取出来给模型看，模型再用核心的 sticker_note 逐个写备注。补的是「V0.3.1 的 get_sticker_image 一次只能看一张」这段往返开销（宿主 04-sticker-plus 的 annotateMissing 语义）。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": [],
+  "permissions": ["web_fetch"]
+}

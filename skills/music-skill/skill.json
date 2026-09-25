@@ -1,0 +1,20 @@
+{
+  "id": "music-skill",
+  "name": "B站点歌",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "群友说「我想听 X」时到 B站 搜歌、把音频当语音发出去（宿主 play_music 语义照搬）。复用 V0.3.1 自带的 plugins/media-download 的 B站 实现；需要 B站 SESSDATA。",
+  "enabledByDefault": false,
+  "settings": {
+    "sessdata": "",
+    "maxDurationMin": 8,
+    "maxSizeMB": 20
+  },
+  "configSchema": {
+    "sessdata": { "type": "string", "label": "B站 SESSDATA", "description": "B站搜索接口必须要 WBI 签名 + SESSDATA，匿名会返回风控页。浏览器登录 B站 后从 Cookie 里复制 SESSDATA 的值。", "secret": true },
+    "maxDurationMin": { "type": "integer", "label": "时长上限（分钟）", "description": "超过就不点，默认 8。" },
+    "maxSizeMB": { "type": "integer", "label": "体积上限（MB）", "description": "下载音频最大体积，默认 20。" }
+  },
+  "capabilities": []
+}

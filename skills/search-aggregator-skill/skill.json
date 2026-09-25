@@ -1,0 +1,12 @@
+{
+  "id": "search-aggregator-skill",
+  "name": "聚合搜索",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "为模型提供多引擎聚合搜索工具 web_search_agg：并行打 bing/so360/baiduWeb/sogou 免 key 引擎，RRF 融合+共识加权+域多样性。用户要「搜一下/查资料」时用。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

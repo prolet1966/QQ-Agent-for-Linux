@@ -1,0 +1,22 @@
+{
+  "id": "image-gen-skill",
+  "name": "检索增强生图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "先联网检索再写生图提示词，然后生成图片并发送（宿主 generate_image 的 searchFirst 增强语义）。与 V0.3.1 既有 image-generate（纯生图，能力 image.generate）共存：本技能是「先查清画面里的事实要素再生图」，纯虚构创作仍用 image-generate。",
+  "enabledByDefault": false,
+  "settings": {
+    "searchFirst": true,
+    "searchMaxResults": 4,
+    "searchTimeoutMs": 5000,
+    "searchRewrite": true
+  },
+  "configSchema": {
+    "searchFirst": { "type": "boolean", "label": "先检索再生图", "description": "开启后先聚合搜索一轮，把检索要点喂进提示词再生图（宿主 imageGen.searchFirst 语义）。超时/失败静默降级直接生图。" },
+    "searchMaxResults": { "type": "number", "label": "检索条数", "description": "先检索时最多取几条，默认 4。" },
+    "searchTimeoutMs": { "type": "number", "label": "检索超时 (ms)", "description": "默认 5000。超时静默降级不拖生图。" },
+    "searchRewrite": { "type": "boolean", "label": "检索要点改写提示词", "description": "开启后把检索要点改写进生图提示词，默认开。" }
+  },
+  "capabilities": []
+}

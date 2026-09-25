@@ -1,0 +1,12 @@
+{
+  "id": "threads-skill",
+  "name": "讨论线工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "memory",
+  "description": "记录与查看「聊到一半」的讨论线索（note_discussion / list_discussions）。软依赖 plugins/threads。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

@@ -1,0 +1,33 @@
+{
+  "id": "body-state",
+  "name": "本体状态",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "本体状态（21 格情绪 + 主干三维，按清单 §3.2 规格新建）：精力/社交/心情三维 · 21 格情绪（独立半衰期衰减 + 唤醒权重）· 五条聚合 · 心情公式 · 情绪→行为概率 · 情绪→温度 · 每日心情重置（凌晨 5 点情绪日）· 睡眠事件掷骰 · 五通道（词表/自报/钩子/手动/结算）。本地 JSON，无外部依赖。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "bodystate.set-emotion",
+    "bodystate.set-axes",
+    "bodystate.status",
+    "bodystate.lexicon",
+    "bodystate.event-hook",
+    "bodystate.settle",
+    "panel.bodystate",
+    "action.bodystate"
+  ],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "inject": false,
+    "moodBase": 0.5,
+    "dailyRebaseHour": 5
+  },
+  "configSchema": {
+    "enabled": { "type": "boolean", "label": "启用本体状态", "description": "总开关。" },
+    "inject": { "type": "boolean", "label": "注入提示词", "description": "开启后把当前本体状态注入系统提示。默认关（先观察）。" },
+    "moodBase": { "type": "number", "label": "基线心情", "description": "0~1，默认 0.5。" },
+    "dailyRebaseHour": { "type": "number", "label": "情绪日起始小时", "description": "默认 5（凌晨 5 点结算昨日）。" }
+  },
+  "prompt": null
+}

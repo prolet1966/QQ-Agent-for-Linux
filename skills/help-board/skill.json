@@ -1,0 +1,121 @@
+{
+  "id": "help-board",
+  "name": "指令一览面板",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "输入 /help 时扫描所有已启用插件的指令、触发话术与「不用下指令就会自己跑」的自动功能，汇总成一张功能一览图发到群里；截图不可用时自动降级为文字列表。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "settings": {
+    "title": "功能指令一览",
+    "subtitle": "输入「/help」随时查看",
+    "width": 760,
+    "maxDescLen": 42,
+    "maxTriggers": 2,
+    "triggerLen": 18,
+    "includeBuiltin": true,
+    "excludeSelf": true,
+    "showTriggers": true,
+    "showPassive": true,
+    "showState": true,
+    "hideInactivePassive": false,
+    "seedTriggers": true,
+    "passiveExclude": [
+      "ban-state",
+      "image-compat",
+      "thinking-adapters",
+      "reply-safety",
+      "account-pool",
+      "speaker-identity",
+      "conversation-memory"
+    ],
+    "passiveInclude": [],
+    "passiveIcons": {
+      "red-packet-radar": "🧧"
+    },
+    "textFallback": true
+  },
+  "configSchema": {
+    "title": {
+      "type": "string",
+      "label": "面板标题",
+      "description": "功能一览图顶部的大标题。"
+    },
+    "subtitle": {
+      "type": "string",
+      "label": "底部小字",
+      "description": "图底部的一行提示语，例如引导群友输入什么指令。"
+    },
+    "width": {
+      "type": "number",
+      "label": "图片宽度",
+      "description": "生成图片的像素宽度（480-1200）。高度按内容自动撑开。默认 760。"
+    },
+    "maxDescLen": {
+      "type": "number",
+      "label": "说明字数上限",
+      "description": "每条功能的说明最多显示多少个字，超出截断加省略号。默认 42。"
+    },
+    "maxTriggers": {
+      "type": "number",
+      "label": "示例话术条数",
+      "description": "每条指令下面最多展示几句「可以这样说」的示例。设 0 就不显示示例。默认 2。"
+    },
+    "triggerLen": {
+      "type": "number",
+      "label": "话术字数上限",
+      "description": "单句示例话术最多几个字，超出截断。默认 18。"
+    },
+    "includeBuiltin": {
+      "type": "boolean",
+      "label": "包含内置功能",
+      "description": "是否把机器人自带的功能（发消息、搜索、看图等）也列进图里。"
+    },
+    "excludeSelf": {
+      "type": "boolean",
+      "label": "不显示本插件自己",
+      "description": "开启后一览图里不会出现「指令一览面板」自身。"
+    },
+    "showTriggers": {
+      "type": "boolean",
+      "label": "显示触发话术",
+      "description": "在每条指令下面标出「怎么说才会触发」。话术来自插件清单的 when/examples，也可在本插件的 triggers.json 里手动补充。"
+    },
+    "showPassive": {
+      "type": "boolean",
+      "label": "显示自动功能",
+      "description": "单独列出那些没有指令、条件满足就自己跑的插件（如视频下载、语音转文字、红包雷达）。"
+    },
+    "showState": {
+      "type": "boolean",
+      "label": "标注启用状态",
+      "description": "自动功能后面标「已启用 / 未启用」，让群友知道哪些需要去设置里打开。"
+    },
+    "hideInactivePassive": {
+      "type": "boolean",
+      "label": "隐藏未启用的自动功能",
+      "description": "开启后只展示已经生效的自动功能，未开启的不再显示。"
+    },
+    "seedTriggers": {
+      "type": "boolean",
+      "label": "生成触发词模板",
+      "description": "首次运行时在本插件数据目录生成 triggers.json 模板，方便给任意插件补写「怎么说」。"
+    },
+    "textFallback": {
+      "type": "boolean",
+      "label": "截图失败时改发文字",
+      "description": "当前进程不支持截图时，自动改为发送文字版一览，保证 /help 永远有回应。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "help-board-rule",
+        "title": "指令一览",
+        "priority": 45,
+        "content": "当群友输入「/help」「help」「帮助」「菜单」「有什么功能」「指令列表」或询问机器人能做什么时，必须调用 help_board 工具：它会自动扫描所有已启用插件的指令、触发话术，以及那些不用下指令就会自动生效的功能（比如发链接自动下载视频、语音转文字、红包雷达），生成一张功能一览图发到群里。工具已经把图和文字都发出去了，你不要自己再复述一遍列表。"
+      }
+    ]
+  }
+}

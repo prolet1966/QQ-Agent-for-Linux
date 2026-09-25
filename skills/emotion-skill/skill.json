@@ -1,0 +1,12 @@
+{
+  "id": "emotion-skill",
+  "name": "情绪工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "为模型提供本体状态工具：set_emotion（记 21 格情绪）/ set_mood（调三维）/ mood_state（查全貌）。消费 plugins/body-state 的 bodystate.* 能力。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

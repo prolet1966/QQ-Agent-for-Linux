@@ -1,0 +1,49 @@
+{
+  "id": "keyword-reply",
+  "name": "关键词自动回复",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "命中关键词时自动发出预设回复。关键词与回复内容可在设置里自由增删，一行一条。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "settings": {
+    "rules": "# 每行一条：关键词=回复内容；多个关键词用 | 分隔（如 你好|在吗=在呢～）\n# 以 # 开头的行是注释，不会生效\n# 回复里可用 {nick} 引用说话人的昵称\n菜单|功能|能干嘛=我可以陪你聊天、查资料、看图片，还能管理群里的打卡哦～\n在吗|在不在=在呢在呢，{nick} 找我什么事呀～\n谢谢|感谢=不客气呀～",
+    "matchMode": "contains",
+    "ignoreCase": true,
+    "cooldownSec": 5
+  },
+  "configSchema": {
+    "rules": {
+      "type": "string",
+      "multiline": true,
+      "label": "关键词规则表",
+      "description": "每行一条，格式：关键词=回复内容。多个关键词用 | 分隔；以 # 开头的行是注释。回复内容里可用 {nick} 引用说话人昵称。"
+    },
+    "matchMode": {
+      "type": "string",
+      "label": "匹配方式",
+      "description": "contains = 消息里包含关键词即命中（默认）；equals = 消息必须完整等于关键词才命中。"
+    },
+    "ignoreCase": {
+      "type": "boolean",
+      "label": "忽略大小写",
+      "description": "开启后英文关键词不区分大小写。"
+    },
+    "cooldownSec": {
+      "type": "number",
+      "label": "冷却秒数",
+      "description": "同一个会话里，同一个关键词两次触发之间的最小间隔（秒），防止被刷屏。0 表示不限制。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "keyword-reply-rule",
+        "title": "关键词自动回复",
+        "priority": 45,
+        "content": "本群配置了关键词自动回复。当用户消息命中关键词时，必须调用 keyword_reply 工具，并把用户消息原文传给 text、说话人昵称传给 nickname。工具会自动发出预设回复，你不要自己另写内容，也不要复述已发出的回复。用户问「有哪些关键词」「自动回复有什么」时，用 keyword_reply_list 列出。"
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "id": "random-image",
+  "name": "二次元随机图片",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "从随机图片接口或 Pixiv 社区代理获取经过安全过滤的二次元图片。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "image.random"
+  ],
+  "requires": [],
+  "settings": {
+    "maxCount": 3,
+    "maxImageBytes": 4194304,
+    "safeMode": true,
+    "source": "auto"
+  },
+  "configSchema": {
+    "maxCount": {
+      "type": "number",
+      "label": "单次图片数量",
+      "description": "单次最多获取几张，默认 3，硬上限 10。"
+    },
+    "maxImageBytes": {
+      "type": "number",
+      "label": "单图体积上限",
+      "description": "每张图片最大字节数，默认 4MB。"
+    },
+    "safeMode": {
+      "type": "boolean",
+      "label": "安全模式",
+      "description": "过滤 R18/R18G 内容，默认开启。"
+    },
+    "source": {
+      "type": "enum",
+      "label": "图源",
+      "description": "auto、pixiv 或 local。",
+      "values": [
+        "auto",
+        "pixiv",
+        "local"
+      ]
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "random-image-safety",
+        "title": "随机图片安全规则",
+        "priority": 90,
+        "content": "随机图片默认启用 safeMode，必须过滤 R18/R18G；不得把 URL 直接发送给群，返回图片数据交由核心工具链处理。"
+      }
+    ]
+  }
+}

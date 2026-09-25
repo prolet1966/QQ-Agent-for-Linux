@@ -1,0 +1,34 @@
+{
+  "id": "meme-engine",
+  "name": "梗库引擎",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "梗库引擎：语义联想（脑内闪过）+ 淘汰锁定 + 真实使用统计 + 从记忆库收编 + 标签规范化。数据落 data/memes.json 与 data/memes-vectors.json。语义向量（3917）软依赖，不可用逐字节退回字面逻辑。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "meme.cue",
+    "meme.data",
+    "panel.meme"
+  ],
+  "requires": [],
+  "settings": {
+    "maxMemes": 200,
+    "semanticEmbedEnabled": true,
+    "semanticEmbedUrl": "http://127.0.0.1:3917",
+    "literalScoreThreshold": 0.64,
+    "semanticScoreThreshold": 0.7,
+    "aliasFloor": 0.75,
+    "vectorCacheTimeoutMs": 8000
+  },
+  "configSchema": {
+    "maxMemes": { "type": "number", "label": "梗库上限", "description": "默认 200。满了按 prune 规则淘汰（locked 永不淘汰）。" },
+    "semanticEmbedEnabled": { "type": "boolean", "label": "启用语义联想", "description": "开启后语义服务可用时走融合打分；不可用自动退回字面逻辑。" },
+    "semanticEmbedUrl": { "type": "string", "label": "语义向量服务地址", "description": "默认 http://127.0.0.1:3917。" },
+    "literalScoreThreshold": { "type": "number", "label": "字面门槛", "description": "字面有交集时的闪出门槛，默认 0.64（宿主实测校准）。" },
+    "semanticScoreThreshold": { "type": "number", "label": "语义门槛", "description": "字面完全不沾边时的门槛，默认 0.70（宿主实测校准）。" },
+    "aliasFloor": { "type": "number", "label": "梗名保底分", "description": "梗名原文出现时保底 0.75（宿主校准）。" },
+    "vectorCacheTimeoutMs": { "type": "number", "label": "向量缓存超时 (ms)", "description": "默认 8000（宿主踩坑：200ms 一批 44 条算不完，语义静默失效；这是缓存路径不在检索关键路径）。" }
+  },
+  "prompt": null
+}

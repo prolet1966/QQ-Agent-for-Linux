@@ -1,0 +1,12 @@
+{
+  "id": "meme-lib",
+  "name": "梗库工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "为模型提供梗库工具：存梗（meme_save）、搜梗（meme_search）、从记忆库收编（meme_import）、管理台（meme_admin 淘汰/锁定/统计）。梗库记录群里可复用的梗/口头禅/外号。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

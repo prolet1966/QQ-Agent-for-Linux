@@ -1,0 +1,22 @@
+{
+  "id": "browse-lock",
+  "name": "浏览锁定",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "把机器人「能主动上哪些网站」收窄到一份域名清单（宿主 03-image-browse 的 security.browseLock 语义）。只作用于主动上网的工具（web_fetch / web_search / send_image / search_images），不碰 QQ 自己的图源（表情包、群聊图片）。默认关闭，开了才生效。",
+  "enabledByDefault": false,
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "enabled": false,
+    "domains": "",
+    "includeSubdomains": true
+  },
+  "configSchema": {
+    "enabled": { "type": "boolean", "label": "启用浏览锁定", "description": "开启后，主动上网的工具只能访问下面清单里的域名。默认关。" },
+    "domains": { "type": "string", "label": "允许的域名（逗号或换行分隔）", "description": "例：bilibili.com, pixiv.net, zhihu.com。粘整条网址也行，会自动清洗成域名。留空 = 不生效。" },
+    "includeSubdomains": { "type": "boolean", "label": "包含子域名", "description": "开启后 bilibili.com 也放行 api.bilibili.com。默认开。" }
+  },
+  "prompt": null
+}

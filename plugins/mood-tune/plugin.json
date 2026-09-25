@@ -1,0 +1,23 @@
+{
+  "id": "mood-tune",
+  "name": "心情微调层",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "message",
+  "description": "按全局心情档微调群聊随机插话概率（宿主 mood-tune.js 照搬）：random-only 只改 randomPercent，full 允许有效档位 ±1。四条硬护栏（私聊必响应 / @必响应 / 叫别人不响应 / alwaysReplyUsers 优先）结构上碰不到。软依赖 affinity 插件状态，缺了降级为系数 1。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "mood.tune",
+    "mood.status"
+  ],
+  "requires": [],
+  "settings": {
+    "tierShift": "random-only",
+    "moodEnabled": true
+  },
+  "configSchema": {
+    "tierShift": { "type": "enum", "values": ["random-only", "full"], "label": "修正模式", "description": "random-only（默认）只改随机概率；full 允许有效档位 ±1。" },
+    "moodEnabled": { "type": "boolean", "label": "启用心情修正", "description": "关闭后系数恒 1。" }
+  },
+  "prompt": null
+}

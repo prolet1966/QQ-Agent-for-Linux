@@ -1,0 +1,12 @@
+{
+  "id": "memory-growth-skill",
+  "name": "记忆库工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "为模型提供记忆库工具：检索（memory_search）、审核（memory_review）、遗忘（memory_forget）、归档（memory_archive）、捞回（memory_unarchive）。记忆库记录事件/梗/关系三类长期记忆。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

@@ -1,208 +1,191 @@
 # QQ-Agent for Linux
 
-> 一个面向 Linux 平台设计与优化的 QQ 机器人框架，基于 **OneBot v11** 协议，对接 **[SnowLuma](https://github.com/SnowLuma/SnowLuma)** 协议端。
-> **A Linux-first QQ bot framework** built on **OneBot v11**, bridging to **SnowLuma**.
-
-[简体中文](README.md) · **English**
+> 把 QQ-Agent V0.4.4（Windows 桌面版，Node.js + Electron）移植到 Linux，
+> 并打包为 **`.deb` / `.rpm` / AppImage** 三种可直装的发行包。
 
 [![Platform](https://img.shields.io/badge/platform-Linux-blue)](#)
-[![Protocol](https://img.shields.io/badge/OneBot-v11-4b8bbe)](#-协议与协议端)
-[![SnowLuma](https://img.shields.io/badge/protocol--end-SnowLuma-8aadf4)](https://github.com/SnowLuma/SnowLuma)
-[![Status](https://img.shields.io/badge/status-early%20development-orange)](#-项目状态)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Arch](https://img.shields.io/badge/arch-x86__64-lightgrey)](#)
+[![Based on](https://img.shields.io/badge/based%20on-QQ--Agent%20v0.4.4-4b8bbe)](#-许可与署名)
+[![Protocol](https://img.shields.io/badge/OneBot-v11-8aadf4)](#)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 
-## 📌 项目状态
+## 📖 这是什么
 
-**源码与程序包尚未发布，本仓库目前仅包含项目说明文档。**
+[QQ Agent](https://github.com/Kondius/qq-agent) 是一个接 OpenAI 兼容 API 的 QQ 群 AI 机器人，
+自带 16 个技能与 12 个插件，通过 **OneBot v11** 协议与 [SnowLuma](https://github.com/SnowLuma/SnowLuma)
+协议端通信。
 
-当前阶段：**项目规划 / 架构设计**
+它原本是 Windows 桌面程序。**本仓库是它的 Linux 移植版**：修复了全部 Windows-only 硬编码，
+把数据目录改到 XDG 规范位置，并内置了 Linux 版 SnowLuma 协议端与 Linux 版 Electron 运行时，
+最终产出三种安装包。
 
-- [x] 仓库建立、项目定位确定
-- [x] 协议选型：OneBot v11
-- [x] 协议端选型：SnowLuma
-- [x] 实现语言确定：Python
-- [ ] 核心框架实现
-- [ ] SnowLuma 连接层实现
-- [ ] 插件系统
-- [ ] 配置与部署工具
-- [ ] 首个可用版本发布（v0.1.0）
-- [ ] 预编译程序包 / 发行版打包（`.deb` / `.rpm` / Docker 镜像）
+## 📦 发行包
 
-如果你想第一时间收到发布通知，请 **Watch → Custom → Releases only** 订阅本仓库。
-
----
-
-## 🎯 这是什么
-
-QQ-Agent for Linux 的目标，是给 Linux 用户一个**真正为 Linux 而生**的 QQ 机器人运行环境——而不是把 Windows 上写好的东西勉强塞进容器里凑合跑。
-
-它要做成一个 Agent：不只是被动响应关键词，而是能理解上下文、维护会话状态、按需调用外部能力来完成任务的智能体后端。
-
-## ✨ 设计目标
-
-| 目标 | 说明 |
-| --- | --- |
-| **Linux 原生** | 无需 Wine、无需图形界面、无冗余依赖，纯命令行运行 |
-| **systemd 友好** | 提供服务单元模板，一条 `systemctl enable --now` 即可常驻 |
-| **低资源占用** | 目标是在 1 核 512MB 的轻量云主机上稳定运行 |
-| **Agent 架构** | 会话状态管理、多轮上下文、可插拔工具调用 |
-| **插件化** | 功能模块独立加载，热重载，互不干扰 |
-| **协议端解耦** | 通过 OneBot v11 标准协议对接，协议端可替换、可升级 |
-
-## 🔌 协议与协议端
-
-### 协议：OneBot v11
-
-本项目以 **[OneBot v11](https://github.com/botuniverse/onebot-11)** 作为唯一对外通信契约。
-
-选用 v11 而非 v12，是因为当前生态（协议端、SDK、周边工具）对 v11 的支持最完整成熟。标准化的好处是：**协议端被隔离在通信层之后**，未来若要更换或升级协议端，核心逻辑几乎不需要改动。
-
-### 协议端：SnowLuma
-
-**[SnowLuma](https://github.com/SnowLuma/SnowLuma)** 是面向 QQ 客户端的 TypeScript 互操作运行时，将 QQ 原生会话转换为 OneBot v11 动作与事件。
-
-它提供多种对接入口，本项目的接入策略如下：
-
-| 连接方式 | SnowLuma 侧角色 | 本项目计划 |
+| 格式 | 文件 | 安装 |
 | --- | --- | --- |
-| **正向 WebSocket** | WebSocket 服务端 | ✅ **首选**：本项目作为客户端主动连接，断线自动重连 |
-| 反向 WebSocket | WebSocket 客户端 | ✅ 备选：本项目作为服务端监听，供 SnowLuma 回连 |
-| HTTP / HTTP 上报 | HTTP 服务端 / 上报 | ⏳ 后续按需支持 |
+| Debian / Ubuntu | `qq-agent-v0.4.4-amd64.deb` | `sudo apt install ./qq-agent-v0.4.4-amd64.deb` |
+| RHEL / Fedora / Rocky | `qq-agent-v0.4.4-x86_64.rpm` | `sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm` |
+| 通用 | `qq-agent-v0.4.4-x86_64.AppImage` | `chmod +x` 后直接运行 |
 
-**前置准备**（需自行完成，本项目不代管协议端）：
+**架构**：x86_64 · 三种包合计约 370 MB
 
-```bash
-# 1. 从 SnowLuma Releases 下载完整发行包并解压
-#    https://github.com/SnowLuma/SnowLuma/releases
-#    Lite 版需 Node.js 22.13+（23 系需 23.4+）
+> 包体积大的原因是**自包含**：内含官方 SnowLuma Linux 协议端（44 MB，自带 Node 运行时）
+> 与 Electron 33 运行时。好处是用户不必另装 Node，也不必单独部署协议端。
 
-# 2. Linux 下启动
-chmod +x launcher.sh
-./launcher.sh
-
-# 3. 浏览器打开 WebUI，用启动日志中的初始密码登录
-#    http://localhost:5099
-#    扫码登录 QQ，并配置 OneBot 连接（记下端口与 access token）
-```
-
-> ⚠️ **注意**：SnowLuma 使用**源码可见非商业许可（source-available）**，并**不是** OSI 认可的开源许可；其二进制发行包另受 EULA 约束。使用前请阅读其 `LICENSE` 与 `EULA.md`，商业用途需另行取得授权。本项目与之仅为调用关系，不包含也不分发其任何代码或二进制。
-
-## 🏗️ 计划中的架构
-
-```
-┌──────────────────────────────────────────────────────┐
-│  协议端 SnowLuma（独立进程，自行部署）                  │
-│  QQ 原生会话 ──► OneBot v11 动作 / 事件                │
-│  WebUI :5099                                          │
-└───────────────────────┬──────────────────────────────┘
-                        │  OneBot v11 over WebSocket
-                        │  （正向首选 / 反向备选）
-┌───────────────────────▼──────────────────────────────┐
-│  接入层 Access Layer                                  │
-│  连接管理 · 断线重连 · 心跳 · 事件解析 · 动作封装       │
-└───────────────────────┬──────────────────────────────┘
-                        │  标准化内部事件
-┌───────────────────────▼──────────────────────────────┐
-│  核心层 Core                                          │
-│  事件总线 · 会话管理 · 上下文存储 · 调度器              │
-└───────────────────────┬──────────────────────────────┘
-                        │
-┌───────────────────────▼──────────────────────────────┐
-│  Agent 层 Agent Runtime                               │
-│  意图理解 · 多轮对话 · 工具调用 · 记忆                 │
-└───────────────────────┬──────────────────────────────┘
-                        │
-┌───────────────────────▼──────────────────────────────┐
-│  插件层 Plugin Layer                                  │
-│  用户自定义功能模块，独立加载与热重载                   │
-└──────────────────────────────────────────────────────┘
-```
-
-**分层要点**：协议端进程与本项目进程完全分离，两者之间只有 OneBot v11 这一条标准协议线。这意味着协议端崩溃不影响本项目状态管理，本项目重启也不需要重新登录 QQ。
-
-> 架构仍在设计阶段，以上结构可能调整。
-
-## 🗺️ 路线图
-
-**v0.1.0 — 最小可用核心**
-- 接入 SnowLuma 正向 WebSocket，实现消息收发
-- 断线重连、心跳保活、access token 鉴权
-- 基础事件分发与会话管理
-- 命令行启动，支持配置文件
-
-**v0.2.0 — 插件系统**
-- 插件加载器与生命周期管理
-- 简单的插件开发接口（SDK，Python）
-- 热重载
-
-**v0.3.0 — Agent 能力**
-- 多轮上下文管理
-- 工具调用框架
-- 可选的模型服务接入
-
-**v0.4.0 — 连接方式补全**
-- 反向 WebSocket 支持
-- HTTP / HTTP 上报支持
-- 多账号（多协议端实例）并行
-
-**v1.0.0 — 稳定发布**
-- 完整的配置与部署文档
-- systemd 服务单元
-- 发行版安装包与 Docker 镜像
-
-## 📦 安装
-
-尚无可用版本，敬请期待。
-
-未来计划提供以下安装方式：
+### 快速开始
 
 ```bash
-# 方式一：预编译程序包（计划中）
-sudo apt install ./qq-agent-for-linux_x.y.z_amd64.deb
+# Debian / Ubuntu
+sudo apt install ./qq-agent-v0.4.4-amd64.deb && qq-agent
 
-# 方式二：Docker（计划中）
-docker run -d --name qq-agent -v ./config:/etc/qq-agent ghcr.io/prolet1966/qq-agent-for-linux
+# RHEL / Fedora
+sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm && qq-agent
 
-# 方式三：源码构建（计划中）
-git clone https://github.com/prolet1966/QQ-Agent-for-Linux.git
-cd QQ-Agent-for-Linux && ./build.sh
+# 任意发行版（AppImage）
+chmod +x qq-agent-v0.4.4-x86_64.AppImage && ./qq-agent-v0.4.4-x86_64.AppImage
 ```
+
+完整步骤（含必装的 Linux 版 QQ、扫码登录、协议端配置）见 **[安装与部署指南](docs/linux-install.md)**。
+
+## ⚠️ 三件必须知道的事
+
+### 1. 必须先自行安装 Linux 版 QQ
+
+SnowLuma 的工作方式是**注入一个正在运行的 QQ 客户端**，所以本程序**不替代 QQ**：
+
+```bash
+# 从 https://im.qq.com/linuxqq/ 下载 deb
+sudo apt install ./QQ_*.deb         # 装完在 /opt/QQ/qq
+```
+
+程序会自动探测 `/opt/QQ/qq`、`/usr/bin/qq` 等常见路径。
+**QQ 版本需与 SnowLuma 兼容**，版本错配会导致注入失败（表现为 QQ 能登录但机器人收不到消息）。
+
+### 2. 需要放开 `kernel.yama.ptrace_scope`
+
+Ubuntu 默认 `ptrace_scope=1`，禁止注入非子进程，SnowLuma 会报 `COMPONENT_LOAD_FAILED`：
+
+```bash
+echo "kernel.yama.ptrace_scope = 0" | sudo tee /etc/sysctl.d/99-ptrace-inject.conf
+sudo sysctl -p /etc/sysctl.d/99-ptrace-inject.conf
+```
+
+> 这放宽了系统的一项安全限制（允许同用户进程间注入）。请自行权衡影响后再决定。
+
+### 3. 不要用 `sudo` 运行
+
+数据目录已按 XDG 规范落在用户主目录。用 sudo 跑会让属主变成 root，之后以普通用户启动会读写失败。
+
+## 🔧 移植改动
+
+### 数据目录遵循 XDG 规范
+
+| | 原实现（Windows） | 移植后（Linux） |
+| --- | --- | --- |
+| 数据目录 | `<安装目录>/data` | `$XDG_DATA_HOME/qq-agent`（缺省 `~/.local/share/qq-agent`） |
+| 多实例 | `<安装目录>/data-2` | `~/.local/share/qq-agent-2` |
+
+原实现把数据放在安装目录内。Windows 上没问题，但 Linux 装到 `/opt` 后该目录对普通用户只读，
+启动即 `EACCES`；若改用 sudo 运行，数据属主会变成 root，后续升级更麻烦。
+
+**Windows 行为未改变**，仍落在安装目录下。
+
+### 修复的 Windows-only 硬编码
+
+| 原实现 | 问题 | 现实现 |
+| --- | --- | --- |
+| `node.exe` + `launcher.bat` + `cmd.exe` | Linux 全不存在，**SnowLuma 两条启动路径全断** | 三级运行时兜底：发行包自带 node → 系统 node → **Electron 内置 Node**；回退 `launcher.sh` |
+| `wmic process where ...` | Linux 无 wmic，UI 的「停止 SnowLuma」对外部实例完全失效 | 读 `/proc/<pid>/cmdline` 匹配（零依赖） |
+| `explorer.exe` ×2、`cmd.exe` ×1 | 三个 API 必然返回 500 | `xdg-open` |
+| `QQ.exe` 便携端 | Linux 无「便携端」概念 | 探测系统 QQ（`/opt/QQ/qq` 等），仍用独立 `--user-data-dir` 隔离 |
+
+所有平台差异收敛到 **`src/platform.js`**（新增，约 12 KB），业务代码不再直接出现平台命令。
+
+### 打包配置
+
+`package.json` 的 `build` 字段重建，加入 Linux 三种 target、依赖声明与 `asarUnpack`。
+
+**`asarUnpack` 是关键**：SnowLuma 必须解包到 `app.asar.unpacked/`，
+因为 asar 内的文件**无法被 `spawn` 执行** —— 留在里面协议端就起不来。
+
+## ✅ 验证情况
+
+三种包都做了实测，不是"构建成功"就交付：
+
+| 项目 | 结果 |
+| --- | --- |
+| 平台层单元测试 | **35/35**（真实 Linux 上跑；`/proc` 解析用 fixture 模拟，Windows 上也能测） |
+| `.deb` 真机安装冒烟 | **25/25**（apt 安装 → 验文件/协议端/运行时/XDG → 卸载 → 确认用户数据保留） |
+| `.rpm` 冒烟 | **18/18**（`rpm2cpio` 解包 + 与 `.deb` 逐条对照 44 条一致 + 真实启动） |
+| AppImage 冒烟 | **7/7**（实测启动，退出码 124 = 进程持续存活） |
+| 插件与技能加载 | **`loadPlugins()` 已加载 70 / 失败 0**，`skillManager` 加载错误 0 |
+| 数据目录 XDG 落点 | 实测 `/home/<user>/.local/share/qq-agent`，**不在安装目录内** |
+
+### 关于 `.rpm` 的验证方式（如实说明）
+
+WSL 是 Ubuntu，无法 `rpm -i`（会把文件塞进 dpkg 系统且依赖解析混乱）。
+采用的是等价验证：`rpm2cpio` 解出完整文件树 + 与 `.deb` 内容逐条对照 + 用解出的文件树真实启动。
+
+**局限性**：未经 rpm 数据库注册，因此 **pre/post 脚本执行与 rpm 依赖解析这两项未经验证**
+（依赖名已用 `rpm -qpR` 单独核对，含 `xdg-utils` 等 9 项）。
+若需严格验证，请在 RHEL / Fedora 系真机上安装一次。
+
+### 已知限制
+
+- **WSLg 下会打印 GPU 报错**（`GPU process isn't usable. Goodbye.`）。
+  四组对照实验确认：**显式传 `--disable-gpu` 也挡不住**，属环境 GPU 转发问题，不是移植缺陷；
+  后端功能与数据目录均正常。真实桌面与纯服务器上表现不同，需真机复核。
+- **AppImage 在 Ubuntu 24.04+ 需要 `libfuse2`**（`sudo apt install libfuse2t64`），
+  或加 `--appimage-extract-and-run` 运行。这是 AppImage 格式的通用特性，与本项目无关。
+- **插件/技能的可选依赖**：部分插件依赖 MongoDB 或语义向量服务，缺失时会自动降级并打日志。
+
+详见 **[交付与验证报告](docs/linux-delivery-report.md)**。
 
 ## 📚 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [架构设计](docs/architecture.md) | 分层职责、通信链路、会话模型、配置草案、待决问题 |
-| [决策记录](docs/decisions.md) | 已做的决策及其理由、被否决的方案、尚待拍板的问题 |
-| [SnowLuma 部署指南](docs/snowluma-setup.md) | 协议端安装、QQ 扫码登录、OneBot 连接配置与验证 |
-| [贡献指南](CONTRIBUTING.md) | 当前阶段能做什么、Issue 与提交规范、行为准则 |
+| [安装与部署指南](docs/linux-install.md) | 系统要求、三种包安装、Linux QQ、XDG 数据目录、systemd 自启、11 项故障排查 |
+| [交付与验证报告](docs/linux-delivery-report.md) | 目标逐条验收、验证方法与结果、已知限制 |
+| [移植改动清单](docs/linux-port-findings.md) | 侦察出的硬编码点与施工优先级 |
+| [构建脚本](build-scripts/) | 26 个脚本：同步源码 → 取协议端 → 构建 → 三套冒烟 → 收回产物 |
 
-## 🤝 参与贡献
+### 复现构建
 
-项目还在起步阶段，但现在正是**讨论与设计最容易产生价值**的时候。
+需要 Linux 环境（实测 Ubuntu 26.04 / WSL2）与 Node.js 20+。脚本已处理路径、行尾与镜像问题：
 
-- 有想法、有需求、有反对意见 → 欢迎开 [Issue](https://github.com/prolet1966/QQ-Agent-for-Linux/issues) 讨论
-- 想参与开发 → 请先开 Issue 说明你的想法，避免重复劳动
-- 发现问题 → 提交 Issue 时请附上系统版本、运行环境与复现步骤
+```bash
+wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/bootstrap-wsl-scripts.sh  # 放入构建脚本
+wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/pipeline.sh               # 同步→装协议端→构建
+wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/verify-all.sh             # 三套冒烟 + 产物指纹核对
+wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/collect-artifacts.sh      # 收回产物与校验和
+```
 
-## ⚠️ 免责声明
+构建前会自动跑平台层单测，因此"能构建"本身就意味着核心逻辑自洽。
 
-本项目为**非官方**开源项目，与腾讯公司、QQ 官方，以及 SnowLuma 项目均无隶属或授权关系。
+## ⚖️ 许可与署名
 
-使用者需自行遵守当地法律法规、腾讯 QQ 用户协议、SnowLuma 的许可条款及相关平台规则。请勿将本项目用于任何违法用途、垃圾信息发送、恶意骚扰或侵犯他人隐私的行为。因使用本项目产生的一切后果由使用者自行承担。
+- **上游项目**：QQ Agent，作者 **Kondius**，**MIT** 许可 —— <https://github.com/Kondius/qq-agent>
+  本移植版**保留原作者署名**（`package.json` 的 `author` 字段未改动），并随附上游 [LICENSE](LICENSE)。
+- **本移植版的 `maintainer`** 为 `prolet1966` —— 这是「这个重打包的 Linux 包出问题找谁」的字段，
+  与原作者署名是两件事。
+- **SnowLuma**（内置的协议端）是独立第三方项目，采用**源码可见非商业许可**，
+  **不是** OSI 开源许可；商业使用需另行取得其书面授权。
+  其 `EULA.md` 与 `PRIVACY.md` 随包分发在 `snowluma/` 目录内。
+- 本项目与腾讯 / QQ 官方**无隶属或授权关系**。请遵守《QQ 用户协议》及当地法律法规。
 
-## 📄 许可证
+## 🤝 反馈
 
-本项目自身代码采用 [Apache License 2.0](LICENSE)。
+欢迎提交 Issue 反馈 Linux 平台上的兼容问题。
 
-选用 Apache-2.0 而非 MIT，是因为本项目定位为**框架**：Apache-2.0 在第 3 条中明确授予专利许可，并含专利 retaliation 条款，对企业与商业部署场景更清晰。它同样是宽松许可，允许自由使用、修改与再分发。
-
-> **注意**：本仓库的 Apache-2.0 许可**不覆盖** [SnowLuma](https://github.com/SnowLuma/SnowLuma) 或任何第三方协议端。SnowLuma 采用**源码可见非商业许可（non-commercial）**，与本项目的许可相互独立，请分别遵守——**更换本项目的许可证不会改变 SnowLuma 对你的约束**。
+提交日志时请**先剔除 token、QQ 号、IP 等敏感信息**。
+程序默认会对日志里的长数字 ID 打码（`core.log_show_raw_ids = false`），
+但配置文件与数据目录中的内容仍需自行检查。
 
 ---
 
 <p align="center">
-  <sub>Made for Linux · OneBot v11 · Powered by SnowLuma · 项目正在建设中，感谢你的耐心与关注</sub>
+  <sub>Linux port of QQ Agent v0.4.4 · OneBot v11 · Powered by SnowLuma · x86_64</sub>
 </p>

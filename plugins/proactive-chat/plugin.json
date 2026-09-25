@@ -1,0 +1,29 @@
+{
+  "id": "proactive-chat",
+  "name": "主动开场",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "message",
+  "description": "主动开场/连发窗口（宿主阶段二 12 号 burst-wake 语义照搬）：被禁言的群直接不跑（禁言守卫）；scheduleWake 改自适应连发窗口，群里聊得热时主动接话不冷场。",
+  "enabledByDefault": false,
+  "capabilities": [],
+  "_note": "本插件为纯钩子插件（after-response + before-context），不声明 capabilities。原 proactive.schedule 自建能力名核心无消费点，按 plugin-development.md §5 降级为顶层普通导出 proactiveStatus()（供控制台/审计查询），避开孤儿能力审计报错。",
+  "requires": [
+    "chat.ban-state"
+  ],
+  "settings": {
+    "enabled": false,
+    "burstWindowSec": 180,
+    "minGapSec": 20,
+    "maxConsecutive": 3,
+    "quietHours": true
+  },
+  "configSchema": {
+    "enabled": { "type": "boolean", "label": "启用主动开场", "description": "开启后群里聊得热时机器人会主动接话（不冷场）。默认关。" },
+    "burstWindowSec": { "type": "number", "label": "连发窗口 (秒)", "description": "窗口内连发 N 条视为「群聊热」，默认 180。" },
+    "minGapSec": { "type": "number", "label": "连发最小间隔 (秒)", "description": "两条主动消息之间至少隔这么久，默认 20。" },
+    "maxConsecutive": { "type": "number", "label": "连续主动上限", "description": "最多连主动几条，默认 3（防刷屏）。" },
+    "quietHours": { "type": "boolean", "label": "安静时段不主动", "description": "开启后安静时段（由核心 quiet-hours 能力决定）不主动接话。" }
+  },
+  "prompt": null
+}

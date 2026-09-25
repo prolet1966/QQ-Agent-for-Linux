@@ -1,0 +1,13 @@
+{
+  "id": "knowledge-verify",
+  "name": "知识库校验",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "为模型提供知识库工具：检索（kb_recall）、管理员追加（kb_write）、爬取入库（kb_crawl）。凡需要事实依据的问题先用 kb_recall。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": [],
+  "permissions": ["web_fetch"]
+}

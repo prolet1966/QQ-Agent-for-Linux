@@ -1,0 +1,48 @@
+{
+  "id": "knowledge-memes",
+  "name": "知识库（梗库）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "把群里的梗、口头禅、内部笑话、可复用短笔记存下来：闲聊时弱相关也会「脑内闪过」一两条，需要细节时再搜。",
+  "author": "QQ Agent",
+  "enabledByDefault": false,
+  "settings": {
+    "cueEnabled": true,
+    "cueLimit": 2,
+    "tipCount": 8,
+    "searchLimit": 5
+  },
+  "configSchema": {
+    "cueEnabled": {
+      "type": "boolean",
+      "label": "脑内闪过",
+      "description": "收到消息时先本地比对一次知识库，沾边的条目只在提示词里闪一下「梗名」（不给全文）。关掉后只有模型主动搜才会用到知识库。"
+    },
+    "cueLimit": {
+      "type": "number",
+      "label": "每次闪过几条",
+      "description": "默认 2。太多会干扰当前话题。"
+    },
+    "tipCount": {
+      "type": "number",
+      "label": "常驻提示条数",
+      "description": "提示词里常驻「你知道这些梗」最多列几条，默认 8。设 0 关闭。"
+    },
+    "searchLimit": {
+      "type": "number",
+      "label": "搜索返回条数",
+      "description": "memory_meme_search 默认返回几条，默认 5。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "knowledge-memes-note",
+        "title": "知识库",
+        "priority": 30,
+        "content": "群里出现的梗、口头禅、内部笑话可以用 memory_meme_save 记下来（原文短句，可带 tags/note），需要时用 memory_meme_search 搜。别把一次性的闲聊也往里塞——只记「以后还会用到」的。"
+      }
+    ]
+  }
+}

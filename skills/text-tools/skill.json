@@ -1,0 +1,48 @@
+{
+  "id": "text-tools",
+  "name": "文本工具",
+  "version": "1.0.0",
+  "description": "文本处理工具集：反转、统计",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "permissions": [],
+  "prompt": {
+    "when": "当用户要求反转文字、统计字数、玩文字游戏时",
+    "examples": [
+      "把这句话倒过来说",
+      "这段话多少字？",
+      "帮我统计一下这段文字"
+    ],
+    "instruction": "根据用户需求调用 text_reverse 或 text_count 工具。text_reverse 用于反转文字，text_count 用于统计字数/字符数/行数。"
+  },
+  "tools": [
+    {
+      "id": "text_reverse",
+      "name": "文本反转",
+      "description": "把一段文字倒过来",
+      "category": "system",
+      "icon": "🔄",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "要反转的文字" }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "id": "text_count",
+      "name": "字数统计",
+      "description": "统计一段文字的字数、字符数、行数",
+      "category": "system",
+      "icon": "🔢",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "要统计的文字" }
+        },
+        "required": ["text"]
+      }
+    }
+  ]
+}

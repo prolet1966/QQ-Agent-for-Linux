@@ -1,0 +1,78 @@
+{
+  "id": "schedule",
+  "name": "日程表",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "可自己添加日程（明天下午三点开会、每周一晨会、每月 5 号交房租），到点自动在群里提醒。时间用中文说得清，也认 ISO 时间。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "settings": {
+    "defaultHour": 9,
+    "defaultMinute": 0,
+    "rollToTomorrow": true,
+    "ambiguousHour": "pm",
+    "tickMs": 30000,
+    "staleMs": 7200000,
+    "keepDays": 30,
+    "reminderText": "{title}{note}",
+    "listLimit": 20
+  },
+  "configSchema": {
+    "defaultHour": {
+      "type": "number",
+      "label": "默认小时",
+      "description": "只说了日期没说几点时的默认小时（0-23）。默认 9，即上午九点。"
+    },
+    "defaultMinute": {
+      "type": "number",
+      "label": "默认分钟",
+      "description": "只说了日期没说几点时的默认分钟（0-59）。默认 0。"
+    },
+    "rollToTomorrow": {
+      "type": "boolean",
+      "label": "今天已过就顺延到明天",
+      "description": "只说「三点开会」且今天三点已经过了时，自动安排到明天三点，而不是立刻提醒。"
+    },
+    "ambiguousHour": {
+      "type": "string",
+      "label": "模糊小时按哪种算",
+      "description": "「三点」这种没说上午下午的：pm=按下午三点（15:00），am=按凌晨三点（03:00）。默认 pm。"
+    },
+    "tickMs": {
+      "type": "number",
+      "label": "重复日程检查间隔",
+      "description": "重复日程推进下一次的轮询间隔（毫秒）。默认 30000（30 秒）。一次性日程不靠这个。"
+    },
+    "staleMs": {
+      "type": "number",
+      "label": "过期多久就作废",
+      "description": "机器人关机期间错过的重复日程，超过这个毫秒数就不再补提醒，直接跳到下一次。默认 7200000（2 小时）。"
+    },
+    "keepDays": {
+      "type": "number",
+      "label": "历史保留天数",
+      "description": "已触发的一次性日程保留多少天后自动清理（重复日程不会被清理）。默认 30。"
+    },
+    "reminderText": {
+      "type": "string",
+      "label": "提醒文案模板",
+      "description": "到点发出的内容。可用占位符：{title} 标题、{note} 备注（有备注时自动加括号）、{time} 时间。核心会在前面加「⏰ 提醒：」。默认 {title}{note}。"
+    },
+    "listLimit": {
+      "type": "number",
+      "label": "列表条数上限",
+      "description": "查询日程时最多返回多少条。默认 20。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "schedule-rule",
+        "title": "日程表",
+        "priority": 47,
+        "content": "群友说「提醒我…」「加个日程」「明天下午三点开会」「每周一晨会」「下周三交材料」这类带时间的事情时，用 schedule_add 工具添加日程，到点机器人会自己在群里提醒。查询日程用 schedule_list，删除用 schedule_del。把用户原话里的时间原样传给 at 参数（例如「明天下午三点」「2026-09-24 15:00」「每周一 09:30」），工具自己会解析；解析不了会告诉你，那时再改传 ISO 格式。"
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "instance-lock",
+  "name": "单实例锁",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "同一数据目录只允许一个 QQ-Agent 实例运行。冲突时打日志放行（绝不拦启动，宿主语义照搬）；避免两个实例同时写 data/ 造成消息/知识库串写。",
+  "enabledByDefault": true,
+  "capabilities": [],
+  "_note": "instance.lock 原为自建能力名（核心无消费点），按 plugin-development.md §5 降级为普通导出：providers 仍在 index.js 供控制台/审计查询，manifest 不再声明以避开孤儿能力审计报错。",
+  "requires": [],
+  "settings": {
+    "dataDir": "",
+    "lockFileName": "instance.lock"
+  },
+  "configSchema": {
+    "dataDir": { "type": "string", "label": "数据目录", "description": "留空 = 用核心提供的 data 目录。同一目录只允许一个实例。" },
+    "lockFileName": { "type": "string", "label": "锁文件名", "description": "默认 instance.lock（落在数据目录下）。" }
+  },
+  "prompt": null
+}

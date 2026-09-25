@@ -1,0 +1,46 @@
+{
+  "id": "affinity",
+  "name": "好感度态度层",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "好感度/熟悉度态度层（宿主 affinity.js 语义照搬，实测参数全套）：双轴（score -100~+100 决定语气与主动性 + familiarity 0~100 互动累积）· 6 档 + 7 档分值映射 · 词表反馈零 token · 防刷限额（每日上限/同类递减/负向不打折）· P8 轮回（好感归零重来带 buff）· P6 响应画像（per-user 档位/倍率）· 跨档写记忆。本地 JSON 存储，无 Mongo 依赖。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "affinity.query",
+    "affinity.adjust",
+    "affinity.inbound",
+    "affinity.inject",
+    "affinity.rebirth",
+    "panel.affinity",
+    "action.affinity"
+  ],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "inject": true,
+    "injectOnlyWhenMeaningful": true,
+    "toolWrite": false,
+    "baseline": 55,
+    "saturateS": 27,
+    "rawFloor": 10.17,
+    "halfLifeDays": 90,
+    "adminUsers": "",
+    "rebirthEnabled": false,
+    "rebirthBuffMult": 1.5
+  },
+  "configSchema": {
+    "enabled": { "type": "boolean", "label": "启用好感度", "description": "总开关。" },
+    "inject": { "type": "boolean", "label": "注入提示词", "description": "开启后把「我对这人什么感觉」注入系统提示（宿主 inject）。" },
+    "injectOnlyWhenMeaningful": { "type": "boolean", "label": "只在有意义时注入", "description": "熟客档（默认行为）不注入，省 token（宿主语义）。" },
+    "toolWrite": { "type": "boolean", "label": "set_feeling 写权限", "description": "默认关。模型可主动调 set_feeling 调好感度。" },
+    "baseline": { "type": "number", "label": "基线分", "description": "默认 55（无证据时中性偏上）。" },
+    "saturateS": { "type": "number", "label": "tanh 饱和常数 S", "description": "默认 27（宿主实测标定）。" },
+    "rawFloor": { "type": "number", "label": "raw 门槛", "description": "默认 10.17（P75，聊过两句≠有关系）。" },
+    "halfLifeDays": { "type": "number", "label": "半衰期 (天)", "description": "默认 90。" },
+    "adminUsers": { "type": "string", "label": "管理员 QQ（逗号分隔）", "description": "L4「攻击管理员」规则的判定名单。留空该规则不触发。" },
+    "rebirthEnabled": { "type": "boolean", "label": "启用 P8 轮回", "description": "好感归零重来，带正向增益。默认关。" },
+    "rebirthBuffMult": { "type": "number", "label": "轮回增益倍数", "description": "默认 1.5。" }
+  },
+  "prompt": null
+}

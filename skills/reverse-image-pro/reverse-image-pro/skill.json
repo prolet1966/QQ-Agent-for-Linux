@@ -1,0 +1,19 @@
+{
+  "id": "reverse-image-pro",
+  "name": "识图（增强）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "以图识图增强版：拿一张图反查这是谁、出自哪部作品，带纯色/无效图探测（vision-scan 32×32）避免拿纯色图白跑反查源。与 V0.3.1 既有 reverse-image（identify_image）共存：本技能工具 id = identify_image_pro，多了纯色探测守卫。",
+  "enabledByDefault": false,
+  "settings": {
+    "solidColorGuard": true,
+    "minImageBytes": 1024
+  },
+  "configSchema": {
+    "solidColorGuard": { "type": "boolean", "label": "纯色探测守卫", "description": "开启后先做 32×32 纯色探测（宿主 vision-scan.js 语义），纯色/无效图直接判无效不发反查源。" },
+    "minImageBytes": { "type": "number", "label": "最小图片字节数", "description": "低于此字节数判无效，默认 1024。" }
+  },
+  "capabilities": [],
+  "permissions": ["web_fetch"]
+}

@@ -1,0 +1,37 @@
+{
+  "id": "red-packet-radar",
+  "name": "红包雷达",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "fun",
+  "description": "检测群里出现的红包（链接/口令形态），立即在群里提醒，并尝试自动领取（协议端支持时自动生效）。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "capabilities": [
+    "media.download"
+  ],
+  "requires": [],
+  "settings": {
+    "alertText": "🧧 红包雷达：群里出现红包了！快抢！！",
+    "cooldownSec": 10,
+    "tryGrab": true
+  },
+  "configSchema": {
+    "alertText": {
+      "type": "string",
+      "label": "提醒文案",
+      "description": "检测到红包时发到群里的提醒消息。"
+    },
+    "cooldownSec": {
+      "type": "number",
+      "label": "冷却秒数",
+      "description": "同一个会话两次提醒之间的最小间隔（秒）。防止有人连续发红包/聊天里反复提到红包时刷屏。"
+    },
+    "tryGrab": {
+      "type": "boolean",
+      "label": "尝试自动领取",
+      "description": "检测到红包后自动尝试领红包接口。当前协议端没有该接口（会静默失败并记日志）；将来协议端支持后无需改插件即可自动生效。"
+    }
+  },
+  "prompt": null
+}

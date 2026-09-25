@@ -1,0 +1,51 @@
+{
+  "id": "weather-alert",
+  "name": "灾害天气预警",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "query",
+  "description": "查询中央气象台正在生效的台风、寒潮、暴雨、高温等灾害天气预警信号，可按地区与灾种筛选。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "permissions": [
+    "web_fetch"
+  ],
+  "settings": {
+    "localRegion": "",
+    "autoLocate": true,
+    "pageSize": 100,
+    "cacheSec": 60
+  },
+  "configSchema": {
+    "localRegion": {
+      "type": "string",
+      "label": "本地地区",
+      "description": "默认查询的地区，如「深圳」「扬州」「广东」。留空则按网络出口 IP 自动定位所在城市（定位不准时建议手填）。群友点名别的省市时，以对方点名的为准。"
+    },
+    "autoLocate": {
+      "type": "boolean",
+      "label": "自动定位本地",
+      "description": "未填写「本地地区」时，按网络出口 IP 自动判断所在城市。关闭则默认查全国最新预警。"
+    },
+    "pageSize": {
+      "type": "number",
+      "label": "抓取条数",
+      "description": "每次从中央气象台抓取多少条最新预警（1-200）。数值越大覆盖越全但请求越慢，默认 100。"
+    },
+    "cacheSec": {
+      "type": "number",
+      "label": "缓存秒数",
+      "description": "缓存时间内不重复请求气象台接口，避免频繁查询被限流。默认 60 秒。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "weather-alert-rule",
+        "title": "灾害天气预警查询",
+        "priority": 45,
+        "content": "你可以查询中央气象台正在生效的灾害天气预警（台风、寒潮、暴雨、暴雪、高温、大风、大雾、沙尘暴、道路结冰、地质灾害等）。用 weather_alert 查询时：**默认就是查本地**，不要凭空替用户指定地区；只有当群友明确点名了别的省市（如「广东有台风吗」「浙江天气怎么样」）时，才把那个省市传给 region。想了解全国整体情况时用 weather_alert_digest。如实转述预警标题、发布时间与详情链接，不要编造预警内容；查询无结果就说明当前没有该类预警。"
+      }
+    ]
+  }
+}

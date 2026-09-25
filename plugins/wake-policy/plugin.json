@@ -1,0 +1,27 @@
+{
+  "id": "wake-policy",
+  "name": "唤醒策略",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "补齐 V0.3.1 核心档位判定认不出的「按人/按群」唤醒规则：① 必回名单（这些 QQ 说话必回）② 按人关键词（某人有自己的词表）③ 别名/群别名（机器人还有别的名字）。只做「追加响应」，配置写错也不会让机器人不吭声。",
+  "enabledByDefault": false,
+  "capabilities": ["wake.rule"],
+  "requires": [],
+  "settings": {
+    "enabled": false,
+    "alwaysReplyUsers": "",
+    "keywordsByUser": "",
+    "aliases": "",
+    "groupAliases": "",
+    "wakeCount": 0
+  },
+  "configSchema": {
+    "alwaysReplyUsers": { "type": "string", "label": "必回名单（QQ 号，逗号分隔）", "description": "这些人说话一定响应，不管档位设置。留空 = 不用这条。" },
+    "keywordsByUser": { "type": "string", "label": "按人关键词", "description": "JSON 写法：{\"10001\":[\"在吗\",\"早安\"]}；也可行式：10001: 在吗,早安" },
+    "aliases": { "type": "string", "label": "机器人别名（全群通用，逗号分隔）", "description": "核心只认 selfNickname 和 botName；这里补别的叫法，如：澪,Mio。出现即当作被叫。" },
+    "groupAliases": { "type": "string", "label": "群别名（JSON）", "description": "写法：{\"878335260\":[\"浅羽\",\"羽\"]}；只在该群生效。" },
+    "wakeCount": { "type": "integer", "label": "命中时携带的历史条数", "description": "0 = 用核心「被艾特」档的 atCount。" }
+  },
+  "prompt": null
+}

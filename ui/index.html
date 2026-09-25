@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QQ Agent</title>
+  <!-- 内容安全策略：控制台只应加载本机资源。
+       首屏主题预置脚本必须内联（否则会闪白），用它的 sha256 hash 精确放行 ——
+       不再用 'unsafe-inline'（页面多处 innerHTML 拼接，一旦任何一处被注入，
+       unsafe-inline 会让 onerror= 等内联代码直接执行，CSP 形同虚设）。
+       内联样式仍放行（style-src）：主题/布局大量使用内联 style 属性。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob:; connect-src 'self' https://kondius.cn; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <link rel="stylesheet" href="/style.css" />
+  <!-- 主题预置：外链同步脚本（阻塞解析、先于首帧执行）。不放内联是为了 CSP：
+       script-src 'self' 直接覆盖外链，内联则要维护 hash、一改就失效。 -->
+  <script src="/theme-boot.js"></script>
+</head>
+<body>
+  <!-- 背景图层（R40 个性化）：比圆角外壳还低一层（z-index:-2）。
+       只在设置了背景图时由 JS 写入 background-image，否则保持空层（不画、不占渲染）。
+       ⚠️ 它自己带 border-radius —— 否则图片会铺成方角，把 .win-frame 拼出来的
+          圆角外面露出四个直角。它是唯一的静态层（fixed、无内容、不随滚动重画），
+          所以这里的整窗圆角裁剪不会碰到"滚动时重画整窗圆角"的性能问题。 -->
+  <div class="app-bg" id="app-bg" aria-hidden="true"></div>
+
+  <!-- 最底层：圆角外壳（零裁剪）。窗口四角靠这个 fixed 层的 7 层背景拼出来，
+       详见 style.css 的「圆角外壳」注释。放在 body 第一个子元素，
+       z-index:-1 让它落在 .app-shell（含其装饰光晕）之下。 -->
+  <div class="win-frame" aria-hidden="true"></div>
+
+  <!-- 应用外壳：grid 布局层（底色已交给 .win-frame）。
+       透明窗口下 body 自己**不能**有背景色 —— 按 CSS 规范，当 html 背景为
+       transparent 时 body 的背景会被传播到画布、铺满整个窗口矩形。 -->
+  <div class="app-shell">
+  <header id="topbar">
+    <div class="brand">QQ Agent <span class="brand-sub"></span></div>
+    <nav id="tabs">
+      <!-- 顶级导航按「数据 / 统计 / 扩展 / 系统」分组。
+           原 8 个页签仍保留 .tab + data-tab（点击绑定与 active 切换不受影响），
+           其中「消息」「扩展」收进下拉 —— 点组标题展开/收起（不是悬停展开）。
+           导航整体居中由 #topbar 的三列网格负责（1fr auto 1fr），不靠这里的占位元素。 -->
+      <div class="tab-group">
+        <button class="tab-group-head" type="button" aria-haspopup="true" title="会话 / 存档 / 记忆">
+          消息<span class="tgh-caret">▾</span>
+        </button>
+        <div class="tab-group-menu">
+          <button class="tab active" data-tab="sessions">会话</button>
+          <button class="tab" data-tab="chats">存档</button>
+          <button class="tab" data-tab="memory">记忆</button>
+        </div>
+      </div>
+
+      <button class="tab" data-tab="usage">用量</button>
+
+      <div class="tab-group">
+        <button class="tab-group-head" type="button" aria-haspopup="true" title="技能 / 插件">
+          扩展<span class="tgh-caret">▾</span>
+        </button>
+        <div class="tab-group-menu">
+          <button class="tab" data-tab="skills">技能</button>
+          <button class="tab" data-tab="plugins">插件</button>
+        </div>
+      </div>
+
+      <button class="tab" data-tab="snowluma">SnowLuma</button>
+      <button class="tab" data-tab="settings">设置</button>
+
+      <!-- 金句勾选模式下「确认金句」出现在导航组末尾（默认隐藏）；
+           其余社区入口已移入设置页左栏底部。
+           下面这个 .nav-spacer 是网格布局前留下的占位，现在 #tabs 的宽度由
+           max-content 决定、没有可分配的空余空间，它实际宽度恒为 0（无害，保留以减小 diff）。 -->
+      <span class="nav-spacer"></span>
+      <button class="nav-btn hidden" id="quote-confirm-btn">确认金句</button>
+    </nav>
+
+    <!-- 顶栏右侧原先还有一个「状态胶囊」(.top-status)：就绪圆点 / 主题 / 暂停。
+         2026-09-19 全部迁入「会话」页的状态卡，顶栏不再有任何状态元素。
+         ⚠️ 但别把 .top-status 当成废弃概念 —— 它是顶栏「非导航区」的语义位置，
+         将来若要往顶栏放状态，仍应放在这里（导航 #tabs 是 flex:1，会自动让位）。 -->
+
+    <!-- 窗口控制：无边框窗口（electron/main.js 里 frame: false）自绘的标题栏按钮。
+         刻意写成默认 hidden —— 用浏览器直接打开控制台（如 http://127.0.0.1:3210）
+         时没有 window.qqaDesktop，desktop.js 不会解除隐藏，这组按钮就不会出现在网页里。
+         也刻意不放进 #tabs：它是拖拽区的"豁免块"，与导航项分开更清楚。 -->
+    <div class="win-controls" id="win-controls" hidden>
+      <button class="win-btn" id="win-min-btn" type="button" title="最小化" aria-label="最小化">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0.4 5h9.2" /></svg>
+      </button>
+      <button class="win-btn" id="win-max-btn" type="button" title="最大化" aria-label="最大化">
+        <svg class="ico-max" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.6" y="0.6" width="8.8" height="8.8" /></svg>
+        <svg class="ico-restore" viewBox="0 0 10 10" aria-hidden="true">
+          <rect x="0.6" y="2.8" width="6.6" height="6.6" />
+          <path d="M2.8 2.8V0.6h6.6v6.6H7.2" />
+        </svg>
+      </button>
+      <button class="win-btn win-btn-close" id="win-close-btn" type="button" title="关闭（最小化到托盘）" aria-label="关闭">
+        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0.8 0.8l8.4 8.4M9.2 0.8L0.8 9.2" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="loading-card">
+      <div class="loading-title">QQ Agent 正在启动</div>
+      <div class="loading-sub" id="loading-status">正在启动 SnowLuma 与 OneBot 服务，请稍候…</div>
+      <div class="loading-spinner"></div>
+      <pre class="loading-logs" id="loading-logs"></pre>
+    </div>
+  </div>
+
+  <main id="layout">
+    <!-- 会话视图 -->
+    <section id="view-sessions" class="view active">
+      <aside id="session-list" class="list-pane">
+        <div class="list-head muted">
+          <div class="lh-row">
+            <span id="session-count"></span>
+            <button class="list-head-btn" id="session-broadcast-btn" title="给选中的群/私聊批量发送一条消息">群发</button>
+            <button class="list-head-btn" id="session-clear-btn" title="清空全部已结束的会话记录（保留运行中/等待中的）">清空</button>
+          </div>
+          <!-- OneBot 连接状态 + 当前模型 + 就绪圆点 / 暂停
+               —— 原顶栏「状态胶囊」的全部内容（2026-09-19 迁入；主题按钮 2026-09-20 移除）。
+               随列表头一起吸顶：连接与模型决定「消息收不收得到 / 谁来回复」，
+               就绪圆点指出 QQ / SnowLuma / OneBot / 配置四步卡在哪，都是看会话时最需要的上下文。
+               id 全部未变 → 状态更新、就绪圆点点击跳转、暂停按钮照旧生效。 -->
+          <div class="session-status">
+            <div class="ss-row">
+              <span id="onebot-dot" class="dot dot-off" title="OneBot 连接状态"></span>
+              <span id="onebot-label" class="muted">OneBot 未连接</span>
+            </div>
+            <div class="ss-row">
+              <span id="model-label" class="muted">模型：-</span>
+            </div>
+            <div class="ss-row ss-actions">
+              <!-- 就绪进度指示器：4 圆点 = QQ运行 / SnowLuma运行 / OneBot连接 / 配置完成 -->
+              <span id="readiness-dots" class="readiness-dots" title="就绪进度：点击跳转到对应设置">
+                <span class="rdot" data-target="snowluma" title="QQ 内核未运行"></span>
+                <span class="rdot" data-target="snowluma" title="SnowLuma 未运行"></span>
+                <span class="rdot" data-target="snowluma" title="OneBot 未连接"></span>
+                <span class="rdot" data-target="settings" title="配置未完成"></span>
+              </span>
+              <span class="ss-spacer"></span>
+              <!-- 主题切换按钮（原 🌙/☀️ 图标）已按需求移除：主题在 设置 → 运行环境 里选。
+                   代码里对 #theme-btn 的两处引用都是 null 安全（if (btn) / ?.），按钮不存在不会报错。 -->
+              <!-- 预览演示入口已移到「设置 → 界面与应用 → 预览演示模式」的滑动开关
+                   （原先在顶栏的 #preview-btn 已删除；逻辑仍在 ui/app/00-preview.js）。 -->
+              <button id="pause-btn" class="btn btn-small">暂停</button>
+            </div>
+          </div>
+        </div>
+        <div id="session-items"></div>
+        <div id="session-more" class="list-more muted"></div>
+      </aside>
+      <div id="session-detail" class="detail-pane">
+        <div class="empty-hint">← 选择左侧会话查看完整过程</div>
+      </div>
+    </section>
+
+    <!-- 存档视图 -->
+    <section id="view-chats" class="view">
+      <aside id="chat-list" class="list-pane">
+        <div class="list-head muted">消息存档</div>
+        <div id="chat-items"></div>
+      </aside>
+      <div id="chat-detail" class="detail-pane">
+        <div class="empty-hint">← 选择会话查看消息存档</div>
+      </div>
+    </section>
+
+    <!-- SnowLuma 视图 -->
+    <section id="view-snowluma" class="view">
+      <div id="snowluma-page" class="snowluma-pane"></div>
+    </section>
+
+    <!-- 记忆视图 -->
+    <section id="view-memory" class="view">
+      <aside id="memory-list" class="list-pane">
+        <div class="list-head muted">记忆</div>
+        <div id="memory-items"></div>
+      </aside>
+      <div id="memory-detail" class="detail-pane">
+        <div class="empty-hint">← 选择会话查看记忆</div>
+      </div>
+    </section>
+
+    <!-- 用量视图 -->
+    <section id="view-usage" class="view">
+      <!-- 今日用量 / 搜索次数（原顶栏状态胶囊的两项）。
+           ⚠️ 必须放在 #usage-page 之外：那个容器由 renderUsagePage() 用
+           innerHTML 整体重建（骨架+轮询刷新），放进去会被下一次渲染直接抹掉。
+           id 保持原样 → refreshStatus 里那两处 textContent 赋值照旧生效。 -->
+      <div class="usage-strip">
+        <div class="usage-strip-inner">
+          <span id="usage-label" class="muted">今日：-</span>
+          <span class="sep"></span>
+          <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）">搜索：-</span>
+        </div>
+      </div>
+      <div id="usage-page" class="usage-pane"></div>
+    </section>
+
+    <!-- 技能视图：从设置页独立出来（原先和模型/聊天设置挤在一起，找不到） -->
+    <section id="view-skills" class="view">
+      <div id="skills-page" class="usage-pane"></div>
+    </section>
+
+    <!-- 插件视图：与技能并列的独立页签。
+         两型的区别在"谁决定何时执行"（确定性 vs 模型决定），是使用者最关心的一件事，
+         所以分成两页各自成组 —— 混在一页里既看不出类型，也数不清各有多少。 -->
+    <section id="view-plugins" class="view">
+      <div id="plugins-page" class="usage-pane"></div>
+    </section>
+
+    <!-- 设置视图 -->
+    <section id="view-settings" class="view">
+      <aside id="settings-sidebar" class="settings-sidebar"></aside>
+      <!-- 社区入口（原顶栏按钮）：固定显示在左栏底部。
+           注意：元素位置移动不影响事件绑定（代码用 id 查询后 addEventListener）。 -->
+      <div class="settings-community">
+        <div class="sc-title">社区</div>
+        <button class="nav-btn" id="quote-btn" title="把机器人的精彩发言收录到金句墙">金句上传</button>
+        <button class="nav-btn" id="feedback-btn" title="向作者反馈意见和建议">意见收集</button>
+        <button class="nav-btn nav-btn-market" id="skill-market-btn" title="打开 Skill 市场">Skill 市场</button>
+        <button class="nav-btn nav-btn-market" id="plugin-market-btn" title="打开插件市场">插件市场</button>
+        <button class="nav-btn" id="persona-plaza-btn" title="打开人设广场">人设广场</button>
+        <button class="nav-btn" id="qq-group-btn" title="加入官方 QQ 群（弹出群二维码）">官方Q群</button>
+        <button class="nav-btn nav-btn-hot" id="open-site-btn" title="打开 QQ Agent 网站">打开网站！</button>
+      </div>
+      <div id="settings-form" class="settings-pane"></div>
+    </section>
+  </main>
+
+  <!-- R70：布局快捷操作。拖动分隔条 / 页签 / 浮层面板 / 状态卡后，
+       在右下角浮出「保存当前排布」「排布恢复默认」，方便用户即时落盘或反悔。
+       默认 hidden，由 ui/app/12-layout.js 在检测到拖动手势后显示。 -->
+  <div id="layout-float-actions" class="layout-float-actions" hidden>
+    <span id="lfa-hint" class="lfa-hint"></span>
+    <button class="btn btn-small btn-primary" id="lfa-save" type="button">💾 保存当前排布</button>
+    <button class="btn btn-small" id="lfa-reset" type="button">↺ 排布恢复默认</button>
+  </div>
+  </div>
+  <!-- /.app-shell -->
+
+  <!-- 自定义气泡提示：必须先于业务脚本 —— 窗口是 transparent 的，Windows 原生
+       tooltip 会渲染成淡黄色色块（且常留残影），所以全局接管 [title]，见 tooltip.js。
+       这两个都是 module，仍排在 app.js（module）之前；后面的 defer 普通脚本
+       与 module 共享同一条按文档顺序的延迟队列，所以整体顺序不变。 -->
+  <script type="module" src="/tooltip.js"></script>
+  <script type="module" src="/desktop.js"></script>
+
+  <!-- M9 拆分：ESM 桥（vendor 模块 → window）先执行；其后 12 段普通脚本按 defer 顺序执行，
+       module 与 defer 共享同一条按文档顺序的延迟队列，保证桥先于 00-core.js。 -->
+  <script type="module" src="/app.js"></script>
+  <script defer src="/app/00-core.js"></script>
+  <script defer src="/app/00-preview.js"></script>
+  <script defer src="/app/01-boot.js"></script>
+  <script defer src="/app/02-sse-sessions.js"></script>
+  <script defer src="/app/03-snowluma.js"></script>
+  <script defer src="/app/04-archive-usage.js"></script>
+  <script defer src="/app/05-memory-settings.js"></script>
+  <script defer src="/app/06-settings-render.js"></script>
+  <script defer src="/app/07-settings-events.js"></script>
+  <script defer src="/app/08-modals.js"></script>
+  <script defer src="/app/09-community.js"></script>
+  <script defer src="/app/10-feedback.js"></script>
+  <script defer src="/app/11-init.js"></script>
+  <!-- 自由布局（R51）：拖动分隔条调宽 / 拖拽页签排序 / 排布持久化。
+       放在 11-init（启动流程）之后：它需要在 state.config 已加载后应用布局，
+       而 initFreeLayout 由 11-init 的启动流程末尾调用。 -->
+  <script defer src="/app/12-layout.js"></script>
+</body>
+</html>

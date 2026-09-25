@@ -1,0 +1,50 @@
+{
+  "id": "check-in",
+  "name": "每日打卡",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "可自定义打卡内容，记住群里每个人当天是否打卡，并能催促未打卡的群友。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "settings": {
+    "checkinName": "今日打卡",
+    "checkinText": "",
+    "remindText": "",
+    "retentionDays": 30
+  },
+  "configSchema": {
+    "checkinName": {
+      "type": "string",
+      "label": "打卡名称",
+      "description": "比如「早起打卡」「学习打卡」「今日打卡」。默认「今日打卡」。"
+    },
+    "checkinText": {
+      "type": "string",
+      "multiline": true,
+      "label": "打卡固定文案",
+      "description": "群友打卡时机器人附带的固定话术，可留空让机器人自由发挥。"
+    },
+    "remindText": {
+      "type": "string",
+      "multiline": true,
+      "label": "催促文案",
+      "description": "催打卡时使用的固定文案，可留空使用默认催促语。"
+    },
+    "retentionDays": {
+      "type": "number",
+      "label": "保留天数",
+      "description": "打卡记录保留多少天，超出的自动清理。默认 30。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "check-in-rule",
+        "title": "每日打卡",
+        "priority": 45,
+        "content": "群友说「打卡」「签到」「打卡啦」或表达完成今日打卡时，用 check_in 工具；问「谁还没打卡」「打卡情况」时用 check_in_status；群友要求「催打卡」「提醒打卡」，或每天早晨群里活跃时，用 remind_check_in 提醒未打卡的群友。每天 0 点重置，每人每天只能打一次卡。"
+      }
+    ]
+  }
+}

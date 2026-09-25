@@ -1,0 +1,65 @@
+{
+  "_说明": [
+    "QQ Agent Linux 版：把 Windows 专有路径改掉的最小覆盖片段。",
+    "",
+    "背景：config.json 里存的是绝对路径，从 Windows 迁移过来后这些路径在 Linux 上不存在，",
+    "相关技能会静默失效（不报错，只是不工作，很难发现）。",
+    "",
+    "用法：把下面的键合并进",
+    "    ~/.local/share/qq-agent/config.json",
+    "的对应位置（不是整份替换——config.json 里还有 API Key 等大量其它配置）。",
+    "",
+    "合并后重启 QQ Agent 生效。",
+    "",
+    "⚠️ 本文件不含任何密钥。不要把你真实的 config.json 提交进任何仓库。"
+  ],
+
+  "skills": {
+    "video-frames": {
+      "settings": {
+        "_原值_Windows": "F:/Agnes/vision-skill/vision.js",
+        "visionScript": "/opt/agnes/vision-skill/vision.js",
+        "visionNode": "node",
+        "_说明": "视频抽帧后调用视觉脚本描述画面。Linux 上需要单独部署 vision-skill，或把 visionScript 留空（留空则只有抽帧、不描述）。"
+      }
+    },
+
+    "speech-to-text": {
+      "settings": {
+        "_原值_Windows": "F:/Agnes/vision-skill/.env",
+        "dashscopeEnv": "/opt/agnes/vision-skill/.env",
+        "_说明": "DashScope（通义）语音识别/合成的凭据文件。若把 dashscopeApiKey 直接填在这里，则不需要该文件，把 dashscopeEnv 留空即可。"
+      }
+    },
+
+    "image-generate": {
+      "settings": {
+        "_说明": "baseUrl / apiKey / model 与平台无关，无需改。若之前在 Windows 上用了本地文件路径作为图片来源，那部分需要改成本机的 Linux 路径。"
+      }
+    }
+  },
+
+  "kbGrowth": {
+    "_原值_Windows": "D:\\Program Files\\PremiumSoft\\Navicat Premium 17\\navicat.exe",
+    "mongoClients": {
+      "navicatPath": "",
+      "_说明": "这是本地调试用的 Navicat 路径，仅当你想从界面里直接打开数据库客户端时才用。Linux 上留空即可，或用 'dbgate' / 'dbeaver' 等你自己装的客户端绝对路径。kb-growth 的核心功能（知识库自增长）不依赖它。"
+    }
+  },
+
+  "_其它需要注意的 Windows 残留（若你从 Windows 迁移数据）": [
+    "1) 表情库路径：data/stickers.json 里的表情若是 file:///E:/... 这种绝对路径，",
+    "   批量替换成 Linux 下的对应路径：",
+    "     sed -i 's|file:///E:/QQ-agent-0.4/|file:///home/<用户>/qq-agent-0.4/|g' \\",
+    "       ~/.local/share/qq-agent/stickers.json",
+    "",
+    "2) affinity 档案：把 Windows 侧的 data/affinity/state.json 拷到",
+    "   ~/.local/share/qq-agent/affinity/state.json",
+    "   否则启动日志会提示「未找到 DATA_DIR/affinity/state.json，注入将为空」。",
+    "   注意这只是「好感度注入为空」，技能本身是正常的（只读设计，不会写回）。",
+    "",
+    "3) 数据目录整体迁移：直接整个覆盖即可，程序会自动接管：",
+    "     cp -a <Windows数据目录>/. ~/.local/share/qq-agent/",
+    "   若之前用过 QQ_AGENT_DATA_DIR，记得在新环境也保持一致的指向。"
+  ]
+}

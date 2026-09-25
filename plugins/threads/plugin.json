@@ -1,0 +1,25 @@
+{
+  "id": "threads",
+  "name": "讨论线记忆",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "memory",
+  "description": "记住群里「聊到一半的话题」，下次自然接得上。六维记分卡（新鲜度/热度/参与面/情绪强度/未完度/巩固度）驱动，活跃层带摘要注入、沉睡层只留标签；只主动提最相关 1~3 条，被注入的线索巩固度上升（用进废退）。宿主只给了规格没实现，本插件按规格新建。",
+  "enabledByDefault": false,
+  "capabilities": ["threads.record", "threads.select"],
+  "requires": [],
+  "settings": {
+    "enabled": false,
+    "inject": true,
+    "maxActive": 3,
+    "maxDormant": 5,
+    "activeThreshold": 45
+  },
+  "configSchema": {
+    "inject": { "type": "boolean", "label": "注入提示词", "description": "关掉后仍可用 note_discussion 记录，只是不再主动提起。默认开。" },
+    "maxActive": { "type": "integer", "label": "活跃层最多提几条", "description": "拟人记忆有限，别当档案管理员。默认 3，最大 5。" },
+    "maxDormant": { "type": "integer", "label": "沉睡层最多留几条标签", "description": "只显示标签、不含摘要，省 token。默认 5。" },
+    "activeThreshold": { "type": "integer", "label": "活跃层分数线", "description": "总分 ≥ 这个值才算「聊到一半」。默认 45，调高=更少更精。" }
+  },
+  "prompt": null
+}

@@ -1,0 +1,35 @@
+{
+  "id": "weather-query",
+  "name": "天气查询",
+  "version": "1.0.0",
+  "description": "查询指定城市的实时天气",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "permissions": ["web_fetch"],
+  "prompt": {
+    "when": "当用户问天气、气温、是否下雨、是否适合出门时",
+    "examples": [
+      "今天天气怎么样？",
+      "明天会下雨吗？",
+      "北京现在多少度？",
+      "上海适合出门吗？"
+    ],
+    "instruction": "调用 get_weather 工具，city 参数从用户消息中提取。如果用户没说城市，问他在哪个城市。返回结果包含温度、体感温度、湿度、天气描述、风速。"
+  },
+  "tools": [
+    {
+      "id": "get_weather",
+      "name": "查询天气",
+      "description": "查询指定城市的实时天气",
+      "category": "web",
+      "icon": "🌤️",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": { "type": "string", "description": "城市名（如：北京、上海、深圳）" }
+        },
+        "required": ["city"]
+      }
+    }
+  ]
+}

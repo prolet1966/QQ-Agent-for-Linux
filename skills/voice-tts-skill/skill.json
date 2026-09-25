@@ -1,0 +1,181 @@
+{
+  "id": "voice-tts-skill",
+  "name": "语音合成",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "语音合成（GPT-SoVITS 软依赖）。清单 §4.3 全量：零样本克隆、多音色管理与按角色切换、完整采样参数、自动语音（文字后跟发同音）、情绪自适应（唤醒度/效价双线性插值）、语音缓存（上限+清理）、健康体检与预览。本机没装服务时工具如实降级跳过，不卡聊天。",
+  "enabledByDefault": false,
+  "settings": {
+    "baseUrl": "",
+    "gptWeightsPath": "",
+    "sovitsWeightsPath": "",
+    "voiceScanDir": "",
+    "defaultVoice": "",
+    "voiceByRole": "",
+    "refAudioPath": "",
+    "promptText": "",
+    "promptLang": "zh",
+    "textLang": "zh",
+    "textSplitMethod": "cut5",
+    "speedFactor": 1,
+    "temperature": 1,
+    "topK": 15,
+    "topP": 1,
+    "repetitionPenalty": 1.35,
+    "sampleSteps": 32,
+    "batchSize": 1,
+    "fragmentInterval": 0.3,
+    "seed": -1,
+    "auxRefAudioPaths": "",
+    "timeoutMs": 60000,
+    "maxTextLen": 500,
+    "cacheSize": 200,
+    "healthPath": "/health",
+    "autoVoice": false,
+    "emotionVoice": true
+  },
+  "configSchema": {
+    "baseUrl": {
+      "type": "string",
+      "label": "GPT-SoVITS 服务地址",
+      "description": "留空 = 本机无服务，工具降级跳过。填了才启用，例如 http://127.0.0.1:9880。"
+    },
+    "voiceScanDir": {
+      "type": "string",
+      "label": "音色目录",
+      "description": "放参考音频（wav/mp3/flac/m4a/ogg）的文件夹；每个文件 = 一个音色，名字取文件名。list_voices 会列出来。"
+    },
+    "defaultVoice": {
+      "type": "string",
+      "label": "默认音色",
+      "description": "音色名（不含扩展名）。留空用目录里第一个。"
+    },
+    "voiceByRole": {
+      "type": "string",
+      "label": "按角色切换音色 (JSON)",
+      "description": "写法：{\"主人\":\"mio\",\"群友\":\"mio2\"}；send_voice 传 voice 可临时覆盖。"
+    },
+    "refAudioPath": {
+      "type": "string",
+      "label": "固定参考音频路径",
+      "description": "不用音色目录时，直接指定一个参考音频文件路径。"
+    },
+    "promptText": {
+      "type": "string",
+      "label": "参考音频的文本",
+      "description": "参考音频里说了什么（零样本克隆需要），要和音频一致。"
+    },
+    "promptLang": {
+      "type": "string",
+      "label": "参考音频语言",
+      "description": "zh / en / ja / ko，默认 zh。"
+    },
+    "textLang": {
+      "type": "string",
+      "label": "合成文本语言",
+      "description": "zh / en / ja / ko，默认 zh。"
+    },
+    "textSplitMethod": {
+      "type": "string",
+      "label": "分句方式",
+      "description": "cut5 / cut4 / cut3 / cut2 / cut1 / cut0。默认 cut5。"
+    },
+    "speedFactor": {
+      "type": "number",
+      "label": "语速系数",
+      "description": "1 = 原速。情绪自适应会在此基础上微调（关闭情绪自适应则严格用这个值）。"
+    },
+    "temperature": {
+      "type": "number",
+      "label": "采样温度",
+      "description": "默认 1。"
+    },
+    "topK": {
+      "type": "integer",
+      "label": "topK",
+      "description": "默认 15。"
+    },
+    "topP": {
+      "type": "number",
+      "label": "topP",
+      "description": "默认 1。"
+    },
+    "repetitionPenalty": {
+      "type": "number",
+      "label": "重复惩罚",
+      "description": "默认 1.35。"
+    },
+    "sampleSteps": {
+      "type": "integer",
+      "label": "采样步数",
+      "description": "默认 32；调小更快、质量略降。"
+    },
+    "batchSize": {
+      "type": "integer",
+      "label": "批大小",
+      "description": "默认 1。"
+    },
+    "fragmentInterval": {
+      "type": "number",
+      "label": "分片间隔 (秒)",
+      "description": "默认 0.3。"
+    },
+    "seed": {
+      "type": "integer",
+      "label": "随机种子",
+      "description": "-1 = 每次随机；固定值 = 同文本同音色输出稳定。"
+    },
+    "auxRefAudioPaths": {
+      "type": "string",
+      "label": "辅助参考音频 (逗号分隔)",
+      "description": "可选的额外参考音频，提升音色相似度。"
+    },
+    "gptWeightsPath": {
+      "type": "string",
+      "label": "GPT 权重路径",
+      "description": "可选；留空用服务端当前加载的权重。"
+    },
+    "sovitsWeightsPath": {
+      "type": "string",
+      "label": "SoVITS 权重路径",
+      "description": "可选；留空用服务端当前加载的权重。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "合成超时 (ms)",
+      "description": "默认 60000。"
+    },
+    "maxTextLen": {
+      "type": "number",
+      "label": "单段文字上限 (字)",
+      "description": "默认 500。超了直接拒绝，不发给服务端。"
+    },
+    "cacheSize": {
+      "type": "integer",
+      "label": "缓存上限 (个)",
+      "description": "同文本+同参数的合成结果会复用。默认 200，0 = 不限制。"
+    },
+    "healthPath": {
+      "type": "string",
+      "label": "健康检查路径",
+      "description": "默认 /health。"
+    },
+    "autoVoice": {
+      "type": "boolean",
+      "label": "自动语音",
+      "description": "开启后机器人每发一条文字，会再跟发同内容的语音。默认关（很费算力）。"
+    },
+    "emotionVoice": {
+      "type": "boolean",
+      "label": "情绪自适应",
+      "description": "开启后按本体状态的情绪轴微调语速/音高/音量（双线性插值）。默认开。"
+    }
+  },
+  "capabilities": [
+    "tts.probe",
+    "tts.preview",
+    "tts.voices",
+    "panel.tts"
+  ]
+}

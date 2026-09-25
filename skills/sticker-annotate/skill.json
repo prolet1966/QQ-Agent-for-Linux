@@ -1,0 +1,37 @@
+{
+  "id": "sticker-annotate",
+  "name": "表情包自动标注",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "用视觉模型给没有描述的表情包补一句说明和标签，让机器人更会挑表情。",
+  "author": "QQ Agent",
+  "enabledByDefault": false,
+  "capabilities": [
+    "sticker.annotate"
+  ],
+  "requires": [],
+  "settings": {
+    "autoOnCollect": true,
+    "maxPerRun": 10,
+    "timeoutMs": 120000
+  },
+  "configSchema": {
+    "autoOnCollect": {
+      "type": "boolean",
+      "label": "收藏后自动标注",
+      "description": "机器人收藏新表情后，后台用视觉模型补上描述与标签。"
+    },
+    "maxPerRun": {
+      "type": "number",
+      "label": "单次批量标注上限",
+      "description": "点「一键补备注」时最多处理几个，避免一次消耗太多额度。默认 10。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单张图标注超时（毫秒）",
+      "description": "默认 120000。超时跳过该张，继续下一张。"
+    }
+  },
+  "prompt": null
+}

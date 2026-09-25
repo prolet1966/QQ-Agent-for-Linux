@@ -1,0 +1,12 @@
+{
+  "id": "forward-skill",
+  "name": "合并转发",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "message",
+  "description": "发送合并转发（QQ 聊天记录卡片）：把多条聊天记录打成包发出，而不是一条条刷屏。宿主 13-send-forward 语义照搬，走核心 ctx.sender.sendForward（串行链+限频+存档）。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

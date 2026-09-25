@@ -1,0 +1,27 @@
+{
+  "id": "memory-recall",
+  "name": "回忆工具",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "让模型能主动翻旧账：按关键词检索长期记忆、按天打开原始归档。平常不调用，想不起来时才用。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "capabilities": [],
+  "requires": [
+    "memory.search",
+    "memory.archive"
+  ],
+  "settings": {},
+  "configSchema": {},
+  "prompt": {
+    "sections": [
+      {
+        "id": "recall",
+        "title": "回忆旧事",
+        "priority": 40,
+        "content": "被问到很久以前的事、或你发现自己想不起来时，用 memory_search 按关键词检索长期记忆；命中后想读原始上下文就用 memory_archive 按天翻。不要凭印象编造细节——搜不到就承认想不起来。"
+      }
+    ]
+  }
+}

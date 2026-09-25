@@ -1,0 +1,12 @@
+{
+  "id": "todo-skill",
+  "name": "待办状态机",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "待办状态机（宿主 conversation-memory/pending.js 语义照搬）：memory_todo_save 记待办（LLM 自定过期，到期自动消失）、memory_todo_done 清待办。像「记着明天问一下」——到点就忘，不靠模型每次维护。",
+  "enabledByDefault": false,
+  "settings": {},
+  "configSchema": {},
+  "capabilities": []
+}

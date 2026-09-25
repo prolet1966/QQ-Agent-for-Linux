@@ -1,0 +1,30 @@
+{
+  "id": "search-aggregator",
+  "name": "多引擎搜索聚合",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "多引擎 / 多来源搜索聚合层（宿主 search-aggregator.js 语义照搬）：并行打 bing/so360/baiduWeb/sogou 四个免 key 引擎 → URL 去重 → RRF 融合排序 → 共识加权 → 域多样性截断。某引擎抽风不影响整体；聚合结果为空自动退回单引擎。被生图/知识库联网兜底软依赖调用。",
+  "enabledByDefault": false,
+  "capabilities": [
+    "search.aggregate"
+  ],
+  "requires": [],
+  "settings": {
+    "engines": "bing,so360,baiduWeb,sogou",
+    "timeoutMs": 8000,
+    "maxResults": 8,
+    "maxPerDomain": 3,
+    "consensusBoost": 0.25,
+    "rrfK": 60
+  },
+  "configSchema": {
+    "engines": { "type": "string", "label": "引擎（逗号分隔）", "description": "默认 bing,so360,baiduWeb,sogou（全部免 key，开箱即用）。" },
+    "timeoutMs": { "type": "number", "label": "单引擎超时 (ms)", "description": "默认 8000。某引擎超时只丢它，不影响其他。" },
+    "maxResults": { "type": "number", "label": "最多返回条数", "description": "默认 8。" },
+    "maxPerDomain": { "type": "number", "label": "同站点最多条数", "description": "默认 3，避免一个站霸榜（域多样性）。" },
+    "consensusBoost": { "type": "number", "label": "共识加权系数", "description": "默认 0.25。同一 URL 被 N 个引擎返回 → 分数乘 (1+boost*(N-1))。" },
+    "rrfK": { "type": "number", "label": "RRF 常数 k", "description": "默认 60。倒数排名融合常数。" }
+  },
+  "prompt": null
+}

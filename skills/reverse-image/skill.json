@@ -1,0 +1,49 @@
+{
+  "id": "reverse-image",
+  "name": "以图识图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "拿一张已有的图（表情/群友发的图）反查它是谁、出自哪部作品。默认关闭：会把图上传到临时图床。",
+  "author": "QQ Agent",
+  "enabledByDefault": false,
+  "permissions": ["web_fetch"],
+  "settings": {
+    "allowUpload": true,
+    "maxBytesMB": 8,
+    "useIqdb": true,
+    "timeoutMs": 25000
+  },
+  "configSchema": {
+    "allowUpload": {
+      "type": "boolean",
+      "label": "允许上传临时图床",
+      "description": "只有本地数据、没有公网地址的图，需要先上传到 sm.ms / catbox 才能被识图站点读取。介意图片外传就关掉（关掉后这类图无法反查）。"
+    },
+    "maxBytesMB": {
+      "type": "number",
+      "label": "图片大小上限（MB）",
+      "description": "超过就不上传，默认 8MB。"
+    },
+    "useIqdb": {
+      "type": "boolean",
+      "label": "同时查 IQDB",
+      "description": "IQDB 偏二次元，服务器在国外、经常连不上。关掉可以快一点。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "单个识图站超时（毫秒）",
+      "description": "默认 25000。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "reverse-image-note",
+        "title": "不认识图时别猜",
+        "priority": 32,
+        "content": "看到一个不认识的表情/图片、不确定是谁或出自哪部作品时，用 identify_image 反查，不要凭感觉猜人物或作品名。反查可能没结果，那就老实说不知道。"
+      }
+    ]
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "id": "timed-message",
+  "name": "定时消息",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "到点把指定内容原样发到群里：早上九点发「早安」，每周五下午五点发周报提醒，或者定个时间发一段公告。内容不加任何前缀，说发什么就发什么。",
+  "author": "QQ Agent",
+  "enabledByDefault": true,
+  "settings": {
+    "tickMs": 20000,
+    "catchUpMs": 600000,
+    "maxFails": 3,
+    "defaultHour": 9,
+    "defaultMinute": 0,
+    "rollToTomorrow": true,
+    "ambiguousHour": "pm",
+    "listLimit": 20
+  },
+  "configSchema": {
+    "tickMs": {
+      "type": "number",
+      "label": "检查间隔",
+      "description": "多久检查一次有没有到点的消息（毫秒）。默认 20000（20 秒），也就是最坏延迟 20 秒。"
+    },
+    "catchUpMs": {
+      "type": "number",
+      "label": "补发窗口",
+      "description": "机器人关机期间错过的消息，在这个毫秒数内重启后会补发一次；超过就跳过，免得凌晨三点补发一堆昨天的消息。默认 600000（10 分钟）。"
+    },
+    "maxFails": {
+      "type": "number",
+      "label": "最大失败次数",
+      "description": "连续发送失败多少次后停用这条（防止一直重试刷日志）。默认 3。"
+    },
+    "defaultHour": {
+      "type": "number",
+      "label": "默认小时",
+      "description": "只说了日期没说几点时的默认小时（0-23）。默认 9。"
+    },
+    "defaultMinute": {
+      "type": "number",
+      "label": "默认分钟",
+      "description": "只说了日期没说几点时的默认分钟（0-59）。默认 0。"
+    },
+    "rollToTomorrow": {
+      "type": "boolean",
+      "label": "今天已过就顺延到明天",
+      "description": "只说「九点发」而今天九点已过时，自动改到明天九点，而不是立刻发。"
+    },
+    "ambiguousHour": {
+      "type": "string",
+      "label": "模糊小时按哪种算",
+      "description": "「九点发」这种没说上午下午的：pm=按晚上/上午九点之外的小数字算下午（3点→15点），am=按凌晨算。默认 pm。"
+    },
+    "listLimit": {
+      "type": "number",
+      "label": "列表条数上限",
+      "description": "查询定时消息时最多返回多少条。默认 20。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "timed-message-rule",
+        "title": "定时消息",
+        "priority": 46,
+        "content": "群友说「每天九点发个早安」「明天十点在群里发……」「每周五下午五点提醒交周报」这类**要在指定时间往群里发一段话**的需求时，用 timed_msg_add 工具：把要说的内容原样存下来，到点机器人会自己发到群里（内容不会加任何前缀）。查看用 timed_msg_list，删除用 timed_msg_del。如果系统提示里出现「有 N 条定时消息已到点」，说明有漏发的（多半是机器人重启期间错过的），调用 timed_msg_flush 补发，不要自己复述内容。"
+      }
+    ]
+  }
+}
