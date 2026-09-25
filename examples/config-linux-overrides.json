@@ -1,65 +1,85 @@
 {
   "_说明": [
-    "QQ Agent Linux 版：把 Windows 专有路径改掉的最小覆盖片段。",
+    "QQ Agent Linux 版：平台相关配置项参考模板（**通用版**）。",
     "",
-    "背景：config.json 里存的是绝对路径，从 Windows 迁移过来后这些路径在 Linux 上不存在，",
-    "相关技能会静默失效（不报错，只是不工作，很难发现）。",
+    "用途：config.json 里有些值是**绝对路径或平台相关内容**。若你的配置是从 Windows",
+    "迁移过来的，这些值在 Linux 上不成立，相关技能会**静默失效**（不报错、只是不工作）。",
+    "本文件列出这些项、它们的作用、以及该填什么，供你对照修改。",
     "",
-    "用法：把下面的键合并进",
+    "⚠️ 这不是可以直接粘贴的补丁文件。里面全是占位符，请按自己的实际部署填写。",
+    "",
+    "用法：打开",
     "    ~/.local/share/qq-agent/config.json",
-    "的对应位置（不是整份替换——config.json 里还有 API Key 等大量其它配置）。",
+    "找到下面对应的键，逐项替换成你自己的值。**不要整份覆盖** ——",
+    "config.json 里还有大量与平台无关的配置（API 地址、模型选择、各种开关）。",
+    "改完重启 QQ Agent 生效。",
     "",
-    "合并后重启 QQ Agent 生效。",
-    "",
-    "⚠️ 本文件不含任何密钥。不要把你真实的 config.json 提交进任何仓库。"
+    "⚠️ 本文件不含任何密钥，也不含任何人的真实路径。",
+    "⚠️ 你自己的 config.json 含 API Key 与登录凭据，**不要提交进任何仓库**。"
   ],
 
   "skills": {
     "video-frames": {
+      "_作用": "把视频抽成若干帧，交给视觉模型描述画面。",
       "settings": {
-        "_原值_Windows": "F:/Agnes/vision-skill/vision.js",
-        "visionScript": "/opt/agnes/vision-skill/vision.js",
+        "visionScript": "<你的视觉脚本绝对路径，例如 /opt/vision-skill/vision.js>",
+        "_说明_visionScript": "抽帧后调用它做画面描述。**留空则只抽帧、不做描述**（元信息仍可用）。若你不用这个能力，留空即可。",
         "visionNode": "node",
-        "_说明": "视频抽帧后调用视觉脚本描述画面。Linux 上需要单独部署 vision-skill，或把 visionScript 留空（留空则只有抽帧、不描述）。"
+        "_说明_visionNode": "运行上面那个脚本的解释器。填 node 表示用 PATH 里的 node；也可填绝对路径。",
+        "ffmpegPath": "<可选：ffmpeg 绝对路径；留空则用 PATH 里的 ffmpeg>"
       }
     },
 
     "speech-to-text": {
+      "_作用": "语音转文字 / 文字转语音（走 DashScope 通义）。",
       "settings": {
-        "_原值_Windows": "F:/Agnes/vision-skill/.env",
-        "dashscopeEnv": "/opt/agnes/vision-skill/.env",
-        "_说明": "DashScope（通义）语音识别/合成的凭据文件。若把 dashscopeApiKey 直接填在这里，则不需要该文件，把 dashscopeEnv 留空即可。"
+        "dashscopeEnv": "<可选：存放 DASHSCOPE_API_KEY 的 .env 文件绝对路径>",
+        "_说明_dashscopeEnv": "两种用法二选一：① 直接在本配置的 dashscopeApiKey 里填 Key，则本项留空；② 把 Key 写在某个 .env 文件里，这里填该文件路径。",
+        "dashscopeApiKey": "<你的 DashScope API Key，或留空并改用上面的 .env>",
+        "cacheDir": "<可选：语音缓存目录，留空则用数据目录下的默认位置>"
       }
     },
 
     "image-generate": {
+      "_作用": "文生图。",
       "settings": {
-        "_说明": "baseUrl / apiKey / model 与平台无关，无需改。若之前在 Windows 上用了本地文件路径作为图片来源，那部分需要改成本机的 Linux 路径。"
+        "baseUrl": "<你的生图服务地址，例如 https://api.example.com/v1>",
+        "apiKey": "<你的生图服务 Key>",
+        "model": "<模型名>",
+        "_说明": "这几项与平台无关，Windows 上能用的 Linux 上照填即可。需要注意的是：若你之前在 Windows 上配过**本地文件路径**作为图片来源或输出位置，那些路径需要改成 Linux 路径。"
       }
     }
   },
 
   "kbGrowth": {
-    "_原值_Windows": "D:\\Program Files\\PremiumSoft\\Navicat Premium 17\\navicat.exe",
+    "_作用": "知识库自增长（可选模块）。",
     "mongoClients": {
       "navicatPath": "",
-      "_说明": "这是本地调试用的 Navicat 路径，仅当你想从界面里直接打开数据库客户端时才用。Linux 上留空即可，或用 'dbgate' / 'dbeaver' 等你自己装的客户端绝对路径。kb-growth 的核心功能（知识库自增长）不依赖它。"
+      "_说明": "这是「从界面直接打开数据库客户端」用的调试便利项，**不是核心功能**。Linux 上留空即可；若想用，填你自己装的客户端绝对路径（如 dbeaver / dbgate）。核心的知识库读写不依赖它。"
     }
   },
 
-  "_其它需要注意的 Windows 残留（若你从 Windows 迁移数据）": [
-    "1) 表情库路径：data/stickers.json 里的表情若是 file:///E:/... 这种绝对路径，",
-    "   批量替换成 Linux 下的对应路径：",
-    "     sed -i 's|file:///E:/QQ-agent-0.4/|file:///home/<用户>/qq-agent-0.4/|g' \\",
+  "_从 Windows 迁移数据时的其它注意项": [
+    "1) 数据目录整体迁移 —— 直接整个覆盖，程序会自动接管：",
+    "     cp -a <你 Windows 上的数据目录>/. ~/.local/share/qq-agent/",
+    "   若之前用过 QQ_AGENT_DATA_DIR 环境变量，新环境请保持同样的指向，",
+    "   否则程序会认为是全新安装。",
+    "",
+    "2) 表情库路径 —— data/stickers.json 里若存的是 Windows 绝对路径",
+    "   （形如 file:///C:/... 或 file:///D:/...），需要批量替换成 Linux 路径：",
+    "     sed -i 's|file:///<旧盘符>:/<旧目录>/|file:///<新目录>/|g' \\",
     "       ~/.local/share/qq-agent/stickers.json",
+    "   先备份再改。",
     "",
-    "2) affinity 档案：把 Windows 侧的 data/affinity/state.json 拷到",
-    "   ~/.local/share/qq-agent/affinity/state.json",
-    "   否则启动日志会提示「未找到 DATA_DIR/affinity/state.json，注入将为空」。",
-    "   注意这只是「好感度注入为空」，技能本身是正常的（只读设计，不会写回）。",
+    "3) 好感度档案（affinity）—— 需要单独放置：",
+    "     把 Windows 侧的 state.json 拷到",
+    "     ~/.local/share/qq-agent/affinity/state.json",
+    "   不放也可以：技能本身正常工作，只是注入为空。启动日志会提示",
+    "   「未找到 DATA_DIR/affinity/state.json，注入将为空」——这是提示不是报错。",
     "",
-    "3) 数据目录整体迁移：直接整个覆盖即可，程序会自动接管：",
-    "     cp -a <Windows数据目录>/. ~/.local/share/qq-agent/",
-    "   若之前用过 QQ_AGENT_DATA_DIR，记得在新环境也保持一致的指向。"
+    "4) 环境变量覆盖优先级最高，适合放凭据（避免写进配置文件）：",
+    "     export QQ_AGENT_DATA_DIR=...            # 数据目录",
+    "     export QQ_AGENT_PROFILE=2               # 多实例，数据目录与端口自动错开",
+    "   QQ_AGENT_PROFILE=2 时数据目录为 qq-agent-2，HTTP/OneBot 端口整体 +100。"
   ]
 }

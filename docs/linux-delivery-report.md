@@ -2,24 +2,37 @@
 
 > **完成时间**：2026-09-25
 > **目标**：把 QQ-Agent V0.4.4（Node.js + Electron）改造成 Linux 版本并交付三种安装包
-> **状态**：✅ **已完成并验证**
+> **状态**：✅ **已完成并验证 · 已发布到 GitHub**
+
+---
+
+## 〇、发布地址
+
+| 内容 | 地址 |
+| --- | --- |
+| 源码仓库 | <https://github.com/prolet1966/QQ-Agent-for-Linux> |
+| **发行包下载** | <https://github.com/prolet1966/QQ-Agent-for-Linux/releases/tag/v0.4.4-linux> |
+
+> 安装包走 **GitHub Release 附件**而不是提交进仓库：三个包合计约 370 MB，
+> 其中 deb / rpm / AppImage 均**超过 GitHub 单文件 100 MB 限制**，无法直接入仓。
 
 ---
 
 ## 一、交付物
 
-位置：`port/dist/`（同时保留在 WSL `~/qq-agent-linux/app/dist/`）
+位置：`port/dist/`（同时保留在 WSL `~/qq-agent-linux/app/dist/`），并已上传到 Release。
 
 | 文件 | 大小 | SHA256（前 16 位） |
 | --- | --- | --- |
-| `qq-agent-v0.4.4-amd64.deb` | 117 MB | `37b47b4c30477538` |
-| `qq-agent-v0.4.4-x86_64.rpm` | 103 MB | `9d845ea2a87c72e4` |
-| `qq-agent-v0.4.4-x86_64.AppImage` | 150 MB | `8a5d55efef5b8b89` |
+| `qq-agent-v0.4.4-amd64.deb` | 116.6 MB | `023ebec3b80c565a` |
+| `qq-agent-v0.4.4-x86_64.rpm` | 103.1 MB | `7eab74f312d81373` |
+| `qq-agent-v0.4.4-x86_64.AppImage` | 149.9 MB | `71fa67768a37a8bf` |
 
-完整校验和见 `port/dist/SHA256SUMS.txt`。
+完整校验和见 `port/dist/SHA256SUMS.txt`，**已随 Release 一起发布**，
+并已核对远端与本地逐位一致。
 
-**这三个 SHA256 与验证时记录的产物指纹逐位一致** —— 即「验过的包」就是「要发布的包」，
-中间没有被重新构建替换过（这一点单独做了核对，见第四节）。
+**这三个 SHA256 与验证时记录的产物指纹逐位一致** —— 即「验过的包」就是「发布的包」，
+中间没有被重新构建替换过（见第四节 4.5）。
 
 ---
 
@@ -73,10 +86,27 @@
 | `src/routes.js` | 3 处 `explorer.exe`/`cmd.exe` → `platform.openExternal`（`xdg-open`） |
 | `electron/main.js` | 数据目录复用平台层（原有一份重复实现，注释写「数据目录固定在安装目录」） |
 | `package.json` | 重建 `build`：deb/rpm/AppImage target、依赖声明、`asarUnpack`、maintainer |
-| `examples/config-linux-overrides.json` | **新增** Linux 配置覆盖片段（修 Windows 路径残留） |
+| `examples/config-linux-overrides.json` | **新增** Linux 配置项通用参考模板（全占位符，不含任何人的真实路径） |
 | `test/platform-test.mjs` | **新增** 35 项平台层测试 |
 | `test/verify-linux.mjs` | **新增** Linux 实测值打印 |
-| `build-scripts/*.sh` | **新增 21 个脚本**，覆盖取源码 → 装协议端 → 构建 → 三套冒烟 → 收回产物 |
+| `test/direct-load-test.mjs` | **新增** 直连调用 `loadPlugins()`，拿权威加载结果 |
+| `build-scripts/*.sh` | **新增 26 个脚本**，覆盖取源码 → 装协议端 → 构建 → 三套冒烟 → 收回产物 |
+
+### 附带的扩展：17 个插件 + 25 个技能
+
+把 V0.3.1 开发版中 V0.4.4 缺失的扩展一并纳入，合计 **29 插件 / 41 技能**。
+
+**纳入前做了两项验证**（不是直接拷）：
+
+1. **静态扫描**：确认待纳入插件**只使用 V0.4.4 提供的 api 方法**
+   （`capability` / `config` / `log` / `warn`），不调用任何未提供的 api。
+   其声明的部分能力（`affinity.*` / `bodystate.*` / `knowledge.*` 等）V0.4.4 宿主不认识，
+   但 V0.4.4 对能力是**软依赖**语义 —— 宿主会为声明的能力自动注册 null provider，
+   不认识也不会加载失败，只是没人消费。
+2. **工具 id 冲突检查**：V0.4.4 已有工具 id 仅 4 个，25 个候选技能**零冲突**。
+
+**全部新增条目 `enabledByDefault: false`**，即默认关闭、由用户在界面自行启用，
+不会意外改变现有行为。
 
 ### 硬编码修复对照
 
@@ -139,7 +169,36 @@ WSL 是 Ubuntu，无法真正 `rpm -i`（会把文件塞进 dpkg 系统且依赖
 `--appimage-extract-and-run` 启动，退出码 **124**（被 timeout 杀掉 = 进程一直活着），
 数据目录正常建于 XDG 位置。
 
-### 4.5 产物指纹核对
+### 4.5 插件与技能加载：70 / 0
+
+纳入 17 个插件 + 25 个技能后，**必须验证它们真的能加载**。
+
+一开始我试图"启动整个 app 看日志"来判断，但那个方法**不充分**：
+新增插件大多 `enabledByDefault: false`，默认关闭时**不打印任何日志** ——
+于是「日志里没出现」既可能是「没加载」也可能是「加载了但没启用」，分不清。
+而这两者后果完全不同：前者是缺陷，后者是正常设计。
+
+改为**直接调用 V0.4.4 的插件加载器**取权威答案：
+
+```
+loadPlugins()  → 已加载: 70   失败: 0
+skillManager   → 登记总数: 69   已加载: 69   有加载错误: 0
+                已启用: 19（其余为 enabledByDefault=false，属正常）
+```
+
+日志里能看到每个新插件都成功初始化，例如：
+
+```
+[skill:kb-growth] kb-growth 已加载（Mongo/语义向量均为软依赖，缺了自动降级）
+[skill:body-state] body-state 已加载（21 格情绪 + 主干三维，本地 JSON）
+[skill:threads] threads 已加载（讨论线：六维记分卡 + 活跃/沉睡双层窗口；宿主未实现，按清单规格新建）
+[skill:wake-policy] wake-policy 已加载（必回名单 / 按人关键词 / 别名；默认全空 = 不影响）
+```
+
+> `threads` 的自述「**宿主未实现，按清单规格新建**」印证了前文的判断：
+> 扩展作者本就知道宿主可能不认识某些能力，因此做了降级设计。
+
+### 4.6 产物指纹核对
 
 验证前后各算一次 SHA256 并比对，确认三份产物在测试过程中未被改动：
 
