@@ -292,18 +292,43 @@ gh release create "v0.4.4-linux" 三个包 SHA256SUMS.txt \
 > 文档会随仓库分发，把「被清理掉的敏感值」写进文档，等于换了个地方泄露。
 > 只需知道它们已被清理；具体替换记录在本机源码树里（未发布）。
 
-**推送前必须按顺序跑这三步**：
+### 7.2 敏感值存在哪（重要设计）
+
+**敏感值不在任何脚本里。** 它们在仓库外的一个私有文件：
+
+```
+~/.qq-agent-privacy-needles.txt        ← 每行一个值，# 开头为注释
+可用环境变量 QQ_AGENT_PRIVACY_NEEDLES 指向别处
+```
+
+**为什么这样设计**（这是踩过坑之后改的）：
+
+最初 `sanitize-staging.py` / `audit-doc-leaks.py` / `stage-for-github.py`
+把真实 QQ 号与私人词**硬编码在脚本里**当搜索模式。三个问题：
+
+1. **清理工具自己成了泄露源** —— 这些脚本要提交到公开仓库
+2. **每次运行都要先替换自己** —— 实测替换数因此从 6 处涨到 14 处、再涨到 17 处，
+   多出来的正是这几个脚本自身
+3. **换个人接手没法用** —— 想清理自己的标识就得改脚本源码
+
+现在脚本只保留**与身份无关的通用模式**（`sk-` / `SESSDATA` / JWT 等），
+具体标识一律从私有清单读取。相关模块：`build-scripts/privacy_needles.py`。
+
+清单文件不存在时脚本**不会报错**，但会明确提示"本轮不做替换/检查" ——
+避免用户以为清理生效了其实没有（静默失效是最坏的结果）。
+
+### 7.3 推送前的固定三步
 
 ```bash
 python build-scripts/stage-for-github.py    # 挑选文件 + 凭据扫描
-python build-scripts/sanitize-staging.py    # 替换源码里的真实标识
-python build-scripts/audit-doc-leaks.py     # 复查（含文档，上一步不覆盖文档）
+python build-scripts/sanitize-staging.py    # 按私有清单替换标识
+python build-scripts/audit-doc-leaks.py     # 复查（含 staging 与两份 docs）
 ```
 
-`sanitize-staging.py` 只处理源码；`audit-doc-leaks.py` 专门检查文档 ——
-两者都要跑，**文档同样会随仓库分发**。
+**三步都要跑**：`sanitize` 只处理源码，`audit` 覆盖文档 ——
+文档同样会随仓库分发。`audit` 的退出码非零即表示仍有残留。
 
-### 7.2 绝不能进仓库的
+### 7.4 绝不能进仓库的
 
 | 内容 | 位置 | 原因 |
 | --- | --- | --- |
@@ -315,7 +340,7 @@ python build-scripts/audit-doc-leaks.py     # 复查（含文档，上一步不�
 `package.json` 的 `files` 里已有 `!data/**` 等排除规则，但**推送源码时仍要单独确认**——
 上游源码树里就混着 `snowluma/`（含用户数据），`stage-for-github.py` 已把它整个排除。
 
-### 7.3 运行时的凭据
+### 7.5 运行时的凭据
 
 发布出去的包**不含任何凭据**，用户自己填 API Key。
 若要向他人交付**已配置好**的实例，那属于另一个性质（涉及你的 Key），需自行承担风险。
