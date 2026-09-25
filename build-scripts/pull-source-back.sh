@@ -30,13 +30,12 @@ tar -czf "$TARBALL" -C "$SRC" \
   --exclude=./snowluma.win-backup \
   --exclude=./data \
   --exclude=./build-scripts \
+  --exclude=./test/direct-load-test.mjs \
   .
 echo "  包大小: $(du -h "$TARBALL" | cut -f1)"
 
 echo
 echo "== 3. 清理目标代码目录（保留已在工作区的 build-scripts / test）=="
-# 只删代码目录：解包不会删除同名目录里未被覆盖的文件，
-# 所以 test/direct-load-test.mjs 这类「只存在于工作区」的文件能保住。
 for d in src electron ui plugins skills assets; do
   rm -rf "$DST/$d"
 done

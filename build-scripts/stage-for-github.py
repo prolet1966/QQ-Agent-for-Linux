@@ -93,7 +93,12 @@ def should_exclude(rel: str) -> bool:
 
     return False
 
-# 凭据扫描模式
+# ── 凭据扫描模式 ────────────────────────────────────────────────────────
+#
+# 通用模式：与具体身份无关，可以直接写在脚本里。
+# ⚠️ 这里**故意不放"真实 QQ 号"这类具体值** ——
+#    一旦写进脚本，脚本本身就携带了敏感信息，而它是要提交到公开仓库的。
+#    具体标识走仓库外的私有清单，见下面的 load_needles()。
 SECRET_PATTERNS = [
     (r"sk-[A-Za-z0-9]{20,}", "疑似 OpenAI/DashScope API Key (sk-)"),
     (r"SESSDATA=[^;\s\"']+", "B 站 SESSDATA Cookie"),
@@ -101,9 +106,19 @@ SECRET_PATTERNS = [
     (r"buvid3=[A-Za-z0-9\-]+", "B 站 buvid3 Cookie"),
     (r"eyJhbGciOi[A-Za-z0-9_\-\.]{40,}", "疑似 JWT"),
     (r"DedeUserID=\d+", "B 站 DedeUserID"),
-    (r"\b(?:10001|2215188985)\b", "已知的真实 QQ 号"),
     (r"(?i)(api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*[\"'][A-Za-z0-9_\-]{16,}[\"']", "硬编码的凭据赋值"),
 ]
+
+
+def load_needles_from_private_list() -> list[str]:
+    """从仓库外的私有清单读取需要额外检查的具体标识（QQ 号、私人词等）。"""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import privacy_needles as pn
+        return pn.load_needles()
+    except Exception as exc:  # 清单缺失不应让整个流程失败
+        print(f"  ⚠️  私有清单未加载（{exc}），仅使用通用模式扫描")
+        return []
 
 
 def main() -> int:
