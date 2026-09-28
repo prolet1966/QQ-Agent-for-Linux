@@ -65,11 +65,40 @@ jobs:
 
       - name: 安装打包与测试工具链
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            dpkg-dev fakeroot rpm cpio xvfb file squashfs-tools \
-            desktop-file-validate curl ca-certificates xdg-utils \
-            dnf
+
+          # ★ 2026-09-28 首次真跑修正：Ubuntu 24.04 里**没有**名为
+          #   desktop-file-validate 的包。desktop-file-validate 这个**命令**
+          #   由 desktop-file-utils 提供（noble 0.27-2build1，arm64 有）。
+          #   写成 desktop-file-validate 会让 apt 直接报
+          #   "E: Unable to locate package desktop-file-validate" 并 exit 100。
+
+          # 必需工具：缺任何一个都构建/测试不了，一律硬失败
+          REQUIRED="dpkg-dev fakeroot rpm cpio file squashfs-tools curl ca-certificates xdg-utils"
+
+          # 可选工具：缺失只让**对应那一项检查降级**（_smoke-common.sh 里有
+          #   command -v 判空后走 smoke_warn 的分支），不该让整条流水线红掉。
+          #   一个可选包装不上就中断全部构建，是把"检查手段缺失"当成"产物有问题"。
+          OPTIONAL="desktop-file-utils dnf xvfb"
+
+          sudo apt-get install -y --no-install-recommends $REQUIRED
+          for p in $OPTIONAL; do
+            if sudo apt-get install -y --no-install-recommends "$p"; then
+              echo "可选工具已安装：$p"
+            else
+              echo "::warning::可选工具装不上（不阻塞，相关检查项降级）：$p"
+            fi
+          done
+
+          # 装完自检，把"到底缺哪个命令"一次说清，别等后面某步莫名失败
+          for c in dpkg dpkg-deb fakeroot rpm rpmbuild cpio file mksquashfs unsquashfs sha256sum curl; do
+            command -v "$c" >/dev/null 2>&1 || { echo "::error::必需命令缺失：$c"; exit 1; }
+          done
+          for c in desktop-file-validate dnf xvfb-run; do
+            command -v "$c" >/dev/null 2>&1 \
+              || echo "::warning::可选命令缺失（对应检查项降级）：$c"
+          done
 
       - name: 检查前置输入
         run: |
