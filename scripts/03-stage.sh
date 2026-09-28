@@ -229,7 +229,7 @@ cat > "$STAGE_ARCH_DIR/usr/bin/qq-agent" <<'LAUNCHER_EOF'
 #
 # 职责（与 electron/main.js 的 data-dir-xdg 补丁双保险）：
 #   1. 按 XDG 规范导出数据目录（补丁自己也会算，这里导出是为了可见、可覆盖）
-#   2. 补齐 chrome-sandbox 的 setuid 检查（打包/安装过程可能丢位）
+#   2. 判定 chrome-sandbox 沙箱是否真能生效（三重校验），不能则显式降级 --no-sandbox
 #   3. Wayland / X11 自适应
 #   4. locale 兜底，避免中文乱码
 APP_DIR="@PREFIX@"
@@ -244,9 +244,58 @@ mkdir -p "$QQ_AGENT_DATA_DIR" 2>/dev/null || true
 # SnowLuma 的运行目录镜像也建在这里（补丁会自己创建，这里提前建好避免首次启动竞态）
 mkdir -p "$XDG_DATA_HOME/qq-agent/snowluma" 2>/dev/null || true
 
-if [ -f "$APP_DIR/chrome-sandbox" ] && [ ! -u "$APP_DIR/chrome-sandbox" ]; then
-  echo "[qq-agent] 警告：$APP_DIR/chrome-sandbox 缺少 setuid 位，Chromium 沙箱可能不可用。" >&2
-  echo "[qq-agent] 修复：sudo chown root:root '$APP_DIR/chrome-sandbox' && sudo chmod 4755 '$APP_DIR/chrome-sandbox'" >&2
+# ── Chromium 沙箱可用性判定 ───────────────────────────────────────────
+# ⚠️ 判据**不能只看 setuid 位**。三条必须同时成立，少一条沙箱就是废的：
+#      1) 文件带 setuid 位
+#      2) 属主是 root
+#      3) 所在挂载点不是 nosuid
+#
+#    只判第 1 条会在 nosuid 挂载上**误判为「沙箱可用」**：
+#    典型场景是 Parallels / VMware 等虚拟机把系统卷按 nosuid 挂载 ——
+#    位在、属主是 root，但内核照样丢弃它，Chromium 随后直接 FATAL 退出。
+#    这正是「同一台机器上 AppImage 能跑、.deb 跑不起来」的成因
+#    （AppRun 侧早就有这套三重校验，见 06-build-appimage.sh 的 sandbox_effective()；
+#      这里与之对齐，让两种形态行为一致）。
+#
+# 沙箱确实不可用时**显式降级 --no-sandbox 并提示一次**（写标记文件，不重复刷屏）。
+# 注意这是「判定真的用不了才降级」，**不是**无条件关沙箱。
+sandbox_reason() {
+  _f="$1"
+  [ -e "$_f" ] || { echo "missing"; return 0; }
+  [ -u "$_f" ] || { echo "no-setuid"; return 0; }
+  [ "$(stat -c %u "$_f" 2>/dev/null)" = "0" ] || { echo "not-root-owned"; return 0; }
+  _d="$(dirname "$_f")"
+  _opts="$(awk -v d="$_d" '
+    { mp=$2; gsub(/\\040/, " ", mp)
+      # 根挂载点不能拼成 "//"，否则前缀匹配不上（实测踩到过：home/x 取到空串）
+      pfx = (mp == "/") ? "/" : mp "/"
+      if (d == mp || index(d, pfx) == 1) { if (length(mp) > best) { best = length(mp); o = $4 } } }
+    END { print o }' /proc/mounts 2>/dev/null)"
+  case ",$_opts," in *,nosuid,*) echo "nosuid-mount"; return 0 ;; esac
+  echo "ok"
+}
+
+SB_REASON="$(sandbox_reason "$APP_DIR/chrome-sandbox")"
+NO_SANDBOX=""
+if [ "$SB_REASON" != "ok" ]; then
+  NO_SANDBOX="--no-sandbox"
+  STAMP="$QQ_AGENT_DATA_DIR/.sandbox-notice"
+  if [ ! -f "$STAMP" ]; then
+    echo "[qq-agent] 提示：Chromium 沙箱不可用（原因：$SB_REASON）" >&2
+    case "$SB_REASON" in
+      missing)
+        echo "[qq-agent]       装出来的包里没有 chrome-sandbox，属打包问题，建议重装本包。" >&2 ;;
+      no-setuid|not-root-owned)
+        echo "[qq-agent]       修复：sudo chown root:root '$APP_DIR/chrome-sandbox'" >&2
+        echo "[qq-agent]             && sudo chmod 4755 '$APP_DIR/chrome-sandbox'" >&2 ;;
+      nosuid-mount)
+        echo "[qq-agent]       所在挂载点是 nosuid，setuid 会被内核丢弃，chmod 无效。" >&2
+        echo "[qq-agent]       这是 Parallels / VMware 等虚拟机的常见限制；" >&2
+        echo "[qq-agent]       要沙箱请把该卷按 suid 重新挂载，或改用原生（非虚拟机）环境。" >&2 ;;
+    esac
+    echo "[qq-agent]       因此本次以 --no-sandbox 启动（Chromium 沙箱已关闭）。" >&2
+    : > "$STAMP" 2>/dev/null || true
+  fi
 fi
 
 # Wayland 优先，X11 自动回退
@@ -257,7 +306,8 @@ case "${LANG:-}" in
   ""|C|POSIX) LANG=C.UTF-8; export LANG ;;
 esac
 
-exec "$BIN" "$@"
+# shellcheck disable=SC2086
+exec "$BIN" $NO_SANDBOX "$@"
 LAUNCHER_EOF
 
 # 把占位符换成真实安装前缀
