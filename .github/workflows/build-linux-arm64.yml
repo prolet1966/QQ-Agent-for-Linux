@@ -151,6 +151,30 @@ jobs:
           ls -la out/*.AppImage
           file out/*.AppImage || true
 
+      # ★ 这个 bug 就是因为**没有这一层**才漏到用户手里的：
+      #   AppRun 侧早有 sandbox_effective() 与 test/40，但 .deb/.rpm 启动器
+      #   一直只判 setuid 位，于是在 nosuid 挂载（Parallels/VMware）下
+      #   误判「沙箱可用」→ Chromium FATAL → 同一台机器 AppImage 能跑、.deb 跑不起来。
+      #   41 补上启动器侧的判据测试，并且额外检查**降级有没有真的接到 exec 上**
+      #   （光有函数不算修好）。因此 41 缺失即视为构建失败。
+      - name: 沙箱判据回归测试（deb/rpm 启动器，含 nosuid 降级）
+        if: ${{ github.event.inputs.skip_smoke != 'true' }}
+        run: |
+          set -e
+          T=test/41-launcher-sandbox-test.sh
+          if [ ! -f "$T" ]; then
+            echo "::error::$T 不存在。启动器沙箱判据没有回归测试 = 这个 bug 会原样再犯一次。"
+            exit 1
+          fi
+          bash "$T" --arch arm64
+
+      # 40（AppRun 侧）此前从未在 CI 跑过，一直只在本机 WSL 验证过。
+      # 先按非阻断接入，拿一次真实 runner 的结果；确认稳定后再提升为硬门。
+      - name: 沙箱判据回归测试（AppRun 侧，非阻断，待转正）
+        if: ${{ github.event.inputs.skip_smoke != 'true' }}
+        continue-on-error: true
+        run: bash test/40-apprun-sandbox-test.sh --arch arm64
+
       - name: 真实安装 + 冒烟测试（deb）
         if: ${{ github.event.inputs.skip_smoke != 'true' }}
         run: |
