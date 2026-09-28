@@ -1,0 +1,200 @@
+name: build-linux-arm64
+
+# ============================================================================
+#  QQ-Agent Linux arm64 构建 + 冒烟验证
+#
+#  为什么跑在 GitHub 上：本机没有 ARM 电脑，而冒烟测试必须能真正执行 arm64
+#  指令。qemu 用户态模拟跑 Chromium 会因 JIT/seccomp 闪退，结论不可信，
+#  所以用 GitHub 的**原生 arm64 runner**。
+#
+#  ⚠️ runs-on 必须是 ubuntu-24.04-arm（原生 arm64）。
+#     如果写成 ubuntu-latest（x86_64），冒烟那一步会以 "Exec format error" 收场。
+#     arm64 runner 对公开仓库免费；私有仓库需在仓库设置里启用 Arm64 runner。
+#
+#  前置（仓库里必须有）：
+#    ci-input/app-code.tar.gz
+#      由本地 `bash scripts/03-stage.sh --app-tarball ci-input/app-code.tar.gz` 产出。
+#      它是**已套用隐私排除清单**的应用代码，绝不要放原始 resources/app：
+#      原始树里混着 QQ 登录态、私聊消息库、WebUI 令牌、API Key 明文
+#      （见 03-交接文档.md §7 与 05-arm64方案.md §5.4）。
+#      CI 端还会用 99-selfcheck.sh --input 再复检一次，不干净就让构建红掉。
+#
+#  前置（仓库 secret，**现在已经不需要了**）：
+#    SNOWLUMA_SHA256_ARM64 — 曾经用它兜住 arm64 包的官方 SHA256。
+#      2026-09-28 起该值已核对并 pin 进 scripts/lib.sh（6e3c8e31…），
+#      所以**不设这个 secret 也能正常构建**；保留它只是作为需要临时覆盖时的入口。
+#
+#  怎么跑起来（含隐私自查）：见 07-跑CI的步骤.md
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_smoke:
+        description: '跳过冒烟测试（仅调试构建用，产物不可发布）'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*-arm64'
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    name: build + smoke (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    env:
+      # 供 lib.sh 的 snowluma_sha256() 读取；未配置时留空 → 触发硬失败
+      QL_SNOWLUMA_SHA256_ARM64: ${{ secrets.SNOWLUMA_SHA256_ARM64 }}
+      # CI 上 github.com 直连可达，不需要走镜像（摘要校验照旧生效）。
+      # 用 `-` 而非 `:-` 展开，所以这里的空值会原样保留为空。
+      QL_GH_MIRROR: ''
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 确认跑在真 arm64 上
+        run: |
+          echo "uname -m = $(uname -m)"
+          test "$(uname -m)" = "aarch64" || { echo "::error::不是 aarch64 runner，冒烟结论无效"; exit 1; }
+
+      - name: 安装打包与测试工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev fakeroot rpm cpio xvfb file squashfs-tools \
+            desktop-file-validate curl ca-certificates xdg-utils \
+            dnf
+
+      - name: 检查前置输入
+        run: |
+          set -e
+          if [ ! -f ci-input/app-code.tar.gz ]; then
+            echo "::error::缺少 ci-input/app-code.tar.gz"
+            echo "本地执行： bash scripts/03-stage.sh --app-tarball ci-input/app-code.tar.gz"
+            echo "（该 tar 已套用隐私排除清单，切勿改用原始 resources/app）"
+            exit 1
+          fi
+          echo "应用代码 tar: $(du -h ci-input/app-code.tar.gz | cut -f1)"
+
+      - name: 取回并复检应用代码（★ 隐私第二道闸门）
+        run: |
+          set -e
+          mkdir -p ci-app
+          tar -xzf ci-input/app-code.tar.gz -C ci-app
+          # 复检不通过会 exit 1，构建直接红掉——绝不允许把含隐私数据的代码打进包
+          bash scripts/99-selfcheck.sh --input ci-app
+
+      - name: 下载并解包 arm64 运行时
+        run: bash scripts/01-extract.sh --arch arm64
+
+      - name: 组装应用树（含 snowluma 整棵替换）
+        run: bash scripts/03-stage.sh --arch arm64 --app-src ci-app
+
+      - name: 架构审计（x86_64 / PE 混入 / world-writable 即失败）
+        run: bash test/05-arch-audit.sh --arch arm64
+
+      - name: 打 deb 与 rpm
+        run: |
+          bash scripts/04-build-deb.sh --arch arm64
+          bash scripts/05-build-rpm.sh --arch arm64
+
+      - name: 打 AppImage
+        run: |
+          # 注意：CI 是**原生 aarch64**，所以这里用的就是 aarch64 的 appimagetool；
+          # 工具链会按官方摘要校验后落地（见 lib.sh 的 APPIMAGETOOL_* / TYPE2RUNTIME_*）。
+          bash scripts/06-build-appimage.sh --arch arm64
+
+      - name: 产物架构静态校验
+        run: |
+          set -e
+          echo "--- deb ---"
+          dpkg-deb -I out/qq-agent_*_arm64.deb
+          echo "--- rpm ---"
+          rpm -qip out/qq-agent-*.aarch64.rpm
+          rpm -qp --qf 'ARCH=%{ARCH}\n' out/qq-agent-*.aarch64.rpm
+          echo "--- AppImage ---"
+          ls -la out/*.AppImage
+          file out/*.AppImage || true
+
+      - name: 真实安装 + 冒烟测试（deb）
+        if: ${{ github.event.inputs.skip_smoke != 'true' }}
+        run: |
+          set -e
+          if [ ! -f test/10-deb-smoke.sh ]; then
+            echo "::error::test/10-deb-smoke.sh 不存在 —— 冒烟测试无法执行。"
+            echo "不允许静默跳过：没有冒烟的构建不能算「测试无误」。"
+            exit 1
+          fi
+          sudo bash test/10-deb-smoke.sh --arch arm64
+
+      - name: 真实安装 + 冒烟测试（rpm）
+        if: ${{ github.event.inputs.skip_smoke != 'true' }}
+        run: |
+          set -e
+          if [ ! -f test/20-rpm-smoke.sh ]; then
+            echo "::error::test/20-rpm-smoke.sh 不存在 —— rpm 冒烟无法执行。"
+            exit 1
+          fi
+          # 注意：Ubuntu 上没有 rpm 依赖库，脚本会回退 rpm -i --nodeps 并记为
+          # 警告——rpm 的依赖是否满足在本环境**无法验证**，需在 RHEL 系上复测。
+          sudo bash test/20-rpm-smoke.sh --arch arm64
+
+      - name: rpm 依赖解析验证（对照真实 Fedora / RHEL 元数据）
+        run: |
+          set -e
+          if [ ! -f test/50-rpm-deps-resolve.sh ]; then
+            echo "::error::test/50-rpm-deps-resolve.sh 不存在 —— 依赖验证无法执行。"
+            exit 1
+          fi
+          # Ubuntu 上装不了 rpm，所以冒烟里只能 --nodeps；真正「依赖合不合理」
+          # 靠这一步：用 dnf 对着 Fedora / CentOS Stream 9 / Rocky 9 的**真实元数据**
+          # 做纯解析（不装系统）。这补上了冒烟里「依赖未被真实验证」的缺口。
+          bash test/50-rpm-deps-resolve.sh --arch arm64
+
+      - name: 直接运行冒烟测试（AppImage，不需要 sudo）
+        if: ${{ github.event.inputs.skip_smoke != 'true' }}
+        run: |
+          set -e
+          if [ ! -f test/30-appimage-smoke.sh ]; then
+            echo "::error::test/30-appimage-smoke.sh 不存在 —— AppImage 冒烟无法执行。"
+            exit 1
+          fi
+          bash test/30-appimage-smoke.sh --arch arm64
+
+      - name: 收集诊断信息（失败时）
+        if: failure()
+        run: |
+          echo "=== /opt/qq-agent 是否存在 ==="
+          ls -la /opt/qq-agent 2>/dev/null | head -20 || echo "(不存在)"
+          echo "=== 用户数据目录 ==="
+          find "$HOME/.local/share/qq-agent" -maxdepth 3 2>/dev/null | head -40 || echo "(不存在)"
+          echo "=== 最近日志 ==="
+          find "$HOME/.local/share/qq-agent" -name '*.log' -newermt '-1 hour' 2>/dev/null \
+            | head -3 | while read -r f; do echo "--- $f ---"; tail -50 "$f"; done || true
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: qq-agent-arm64-${{ github.run_number }}
+          path: |
+            out/*.deb
+            out/*.rpm
+            out/*.AppImage
+            out/*.sha256
+          retention-days: 30
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report-arm64-${{ github.run_number }}
+          path: |
+            out/report-smoke-*.md
+          if-no-files-found: ignore
+          retention-days: 30
