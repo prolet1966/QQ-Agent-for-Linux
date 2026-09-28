@@ -2,9 +2,10 @@
 
 > 把 QQ-Agent V0.4.4（Windows 桌面版，Node.js + Electron）移植到 Linux，
 > 并打包为 **`.deb` / `.rpm` / AppImage** 三种可直装的发行包。
+> **x86_64 与 arm64 双架构**，各自独立构建与验证。
 
 [![Platform](https://img.shields.io/badge/platform-Linux-blue)](#)
-[![Arch](https://img.shields.io/badge/arch-x86__64-lightgrey)](#)
+[![Arch](https://img.shields.io/badge/arch-x86__64%20%2B%20arm64-lightgrey)](#-发行包)
 [![Based on](https://img.shields.io/badge/based%20on-QQ--Agent%20v0.4.4-4b8bbe)](#-许可与署名)
 [![Protocol](https://img.shields.io/badge/OneBot-v11-8aadf4)](#)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -23,13 +24,36 @@
 
 ## 📦 发行包
 
+**两种架构，三种格式，共六个包。先确认自己的架构：**
+
+```bash
+uname -m
+# x86_64 / amd64  → 用 x86_64 那三个
+# aarch64 / arm64  → 用 arm64 那三个
+```
+
+> ⚠️ **`.deb` 与 `.rpm` 的架构名不一样**：deb 系写 `amd64`/`arm64`，rpm 系写 `x86_64`/`aarch64`。
+> 这是两个生态各自的命名习惯，不是笔误。
+> **树莓派必须是 64 位系统**（`uname -m` 得是 `aarch64`）；32 位 ARM（`armv7l`）Electron 不支持。
+
+### x86_64（Intel / AMD）
+
 | 格式 | 文件 | 安装 |
 | --- | --- | --- |
 | Debian / Ubuntu | `qq-agent-v0.4.4-amd64.deb` | `sudo apt install ./qq-agent-v0.4.4-amd64.deb` |
 | RHEL / Fedora / Rocky | `qq-agent-v0.4.4-x86_64.rpm` | `sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm` |
 | 通用 | `qq-agent-v0.4.4-x86_64.AppImage` | `chmod +x` 后直接运行 |
 
-**架构**：x86_64 · 三种包合计约 370 MB
+### arm64（Apple Silicon / 树莓派 4+ / ARM 服务器）
+
+| 格式 | 文件 | 安装 |
+| --- | --- | --- |
+| Debian / Ubuntu | `qq-agent_0.4.4_arm64.deb` | `sudo apt install ./qq-agent_0.4.4_arm64.deb` |
+| RHEL / Fedora / Rocky | `qq-agent-0.4.4-1.aarch64.rpm` | `sudo dnf install ./qq-agent-0.4.4-1.aarch64.rpm` |
+| 通用 | `QQ-Agent-0.4.4-aarch64.AppImage` | `chmod +x` 后直接运行 |
+
+> arm64 三个包合计约 370 MB（单架构）。
+> 校验和见各 Release 的 `SHA256SUMS.txt`。
 
 > 包体积大的原因是**自包含**：内含官方 SnowLuma Linux 协议端（44 MB，自带 Node 运行时）
 > 与 Electron 33 运行时。好处是用户不必另装 Node，也不必单独部署协议端。
@@ -37,15 +61,25 @@
 ### 快速开始
 
 ```bash
+# ── x86_64 ──
 # Debian / Ubuntu
 sudo apt install ./qq-agent-v0.4.4-amd64.deb && qq-agent
-
 # RHEL / Fedora
 sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm && qq-agent
-
 # 任意发行版（AppImage）
 chmod +x qq-agent-v0.4.4-x86_64.AppImage && ./qq-agent-v0.4.4-x86_64.AppImage
+
+# ── arm64（文件名不同，注意区分）──
+# Debian / Ubuntu
+sudo apt install ./qq-agent_0.4.4_arm64.deb && qq-agent
+# RHEL / Fedora
+sudo dnf install ./qq-agent-0.4.4-1.aarch64.rpm && qq-agent
+# 任意发行版（AppImage）
+chmod +x QQ-Agent-0.4.4-aarch64.AppImage && ./QQ-Agent-0.4.4-aarch64.AppImage
 ```
+
+> **务必用 `apt install ./文件`（带 `./`）**，apt 才会自动补依赖；
+> 直接 `dpkg -i` 不会装依赖，会留下装了一半的状态。
 
 完整步骤（含必装的 Linux 版 QQ、扫码登录、协议端配置）见 **[安装与部署指南](docs/linux-install.md)**。
 
@@ -112,7 +146,9 @@ sudo sysctl -p /etc/sysctl.d/99-ptrace-inject.conf
 
 ## ✅ 验证情况
 
-三种包都做了实测，不是"构建成功"就交付：
+三种包都做了实测，不是"构建成功"就交付。
+
+### x86_64
 
 | 项目 | 结果 |
 | --- | --- |
@@ -123,23 +159,65 @@ sudo sysctl -p /etc/sysctl.d/99-ptrace-inject.conf
 | 插件与技能加载 | **`loadPlugins()` 已加载 70 / 失败 0**，`skillManager` 加载错误 0 |
 | 数据目录 XDG 落点 | 实测 `/home/<user>/.local/share/qq-agent`，**不在安装目录内** |
 
+### arm64
+
+arm64 走独立的 CI：在 **GitHub 原生 `ubuntu-24.04-arm` runner**（真 aarch64，非模拟）上
+构建并跑完整冒烟。之所以不用 `qemu-user` 模拟：Chromium 在模拟下会因 JIT/seccomp 闪退，
+**结论不可信，所以没有拿它充数**。
+
+| 项目 | 结果 |
+| --- | --- |
+| 载荷架构审计 | **13 个 ELF 全部 AArch64**，0 个 x86_64、0 个 Windows 组件（PE） |
+| 原生件齐全 | `snowluma-linux-arm64` / `websocket-linux-arm64` / `ffmpegAddon.linux.arm64` **四个全在且均为 AArch64** |
+| `.deb` 真实安装 + 冒烟 | **29 通过 / 0 失败 / 1 警告**（唯一警告：`dpkg -i` 缺依赖，`apt-get -f install` 补上，属预期） |
+| `.rpm` 真实安装 + 冒烟 | **29 通过 / 0 失败 / 2 警告** |
+| AppImage 真实运行冒烟 | **31 通过 / 0 失败 / 0 警告**（含 FUSE 与免 FUSE 两模式） |
+| rpm 依赖解析 | 对照 **Fedora 44 / CentOS Stream 9 / Rocky Linux 9 真实元数据**做完整闭包解析，**通过** |
+| 启动后可用性 | 控制台 **3210 端口已监听**，`GET /api/config` 返回 **200** 且为合法 JSON（19899 字节，UTF-8 不乱码） |
+| 数据目录落点 | 实测 `/home/runner/.local/share/qq-agent/data`，`/opt` 下无 `data`（程序与数据分离成立） |
+| 隐私红线 | 无 `snowluma/data`、`config`、`logs`、`.db`、`.log`、`community.key` |
+| CI 全流程 | **19/19 步通过**（构建 → 审计 → 三套打包 → 静态校验 → 三套冒烟 → 依赖解析） |
+
+**arm64 冒烟的测试盲区（如实说明）**：未覆盖真实 QQ 客户端登录、扫码、
+SnowLuma 实际注入与 OneBot 消息收发（需要真实 QQ 账号与 Linux QQ 客户端，CI 环境不具备）；
+未覆盖多显示器、中文输入法、声音输出。
+
+### arm64 真机测试（志愿者实测）
+
+> 上表的 CI 环境是**干净的原生 runner**。而在真实机器上（Apple Silicon 的 Parallels 虚拟机，
+> Kali Linux 2026.2 arm64），arm64 的 **AppImage 可正常启动，`.deb` 启动失败**。
+> 二者唯一实质差异是沙箱策略：AppImage 的启动器会检测 `chrome-sandbox` 是否**真正生效**
+> （setuid 位 + 属主 root + 所在挂载点非 `nosuid`）并降级 `--no-sandbox`，
+> 而 `.deb` / `.rpm` 启动器**只判 setuid 位**，在虚拟机的 `nosuid` 挂载下会误判为「沙箱可用」
+> 而触发 Chromium 的 FATAL。**已知问题，修复中**，详见 [鸣谢](#-鸣谢) 一节。
+
 ### 关于 `.rpm` 的验证方式（如实说明）
 
 WSL 是 Ubuntu，无法 `rpm -i`（会把文件塞进 dpkg 系统且依赖解析混乱）。
 采用的是等价验证：`rpm2cpio` 解出完整文件树 + 与 `.deb` 内容逐条对照 + 用解出的文件树真实启动。
 
-**局限性**：未经 rpm 数据库注册，因此 **pre/post 脚本执行与 rpm 依赖解析这两项未经验证**
+**x86_64 的局限性**：未经 rpm 数据库注册，因此 **pre/post 脚本执行与 rpm 依赖解析这两项未经验证**
 （依赖名已用 `rpm -qpR` 单独核对，含 `xdg-utils` 等 9 项）。
 若需严格验证，请在 RHEL / Fedora 系真机上安装一次。
 
-### 已知限制
+> **arm64 已补上这一项**：arm64 的 rpm 是在原生 `ubuntu-24.04-arm` 上用 `rpm -i` **真实安装**的，
+> pre/post 脚本与安装流程均已执行；另外用 `dnf` 对照 Fedora / CentOS Stream 9 / Rocky 9
+> 的真实元数据做了完整依赖闭包解析。
+> 但**仍未在真实 RHEL 系发行版上 `dnf install` 过** —— 文件冲突、脚本执行差异这类问题查不出来。
+
+### 已知限制（两种架构通用）
 
 - **WSLg 下会打印 GPU 报错**（`GPU process isn't usable. Goodbye.`）。
   四组对照实验确认：**显式传 `--disable-gpu` 也挡不住**，属环境 GPU 转发问题，不是移植缺陷；
   后端功能与数据目录均正常。真实桌面与纯服务器上表现不同，需真机复核。
 - **AppImage 在 Ubuntu 24.04+ 需要 `libfuse2`**（`sudo apt install libfuse2t64`），
   或加 `--appimage-extract-and-run` 运行。这是 AppImage 格式的通用特性，与本项目无关。
+- **AppImage 形态下 Chromium 沙箱会关闭**：AppImage 经 FUSE 挂载，而 FUSE 挂载默认带 `nosuid`，
+  setuid 沙箱无法生效。启动器会**检测到并显式降级 `--no-sandbox` 并提示一次**（非静默）。
+  需要沙箱请用 `.deb` / `.rpm`。
 - **插件/技能的可选依赖**：部分插件依赖 MongoDB 或语义向量服务，缺失时会自动降级并打日志。
+- **纯 SSH 无桌面环境跑不起来**：Electron 需要图形会话。调试可用 `xvfb-run`。
+- **SnowLuma 注入需要放开 `ptrace_scope`**：若为 `3` 会拒绝注入，见上文「三件必须知道的事」。
 
 详见 **[交付与验证报告](docs/linux-delivery-report.md)**。
 
@@ -174,6 +252,26 @@ wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/collect-artifacts.sh      # �
 ```
 
 构建前会自动跑平台层单测，因此"能构建"本身就意味着核心逻辑自洽。
+
+#### arm64 的构建方式（与 x86_64 不同）
+
+arm64 **不走上面的 WSL 路径**。原因有两个，都很硬：
+
+1. **不能只用模拟器验收**：`qemu-user` 跑 Chromium 会因 JIT / seccomp 直接闪退，
+   冒烟结论不可信。所以 arm64 的验证在 **GitHub 原生 `ubuntu-24.04-arm` runner** 上做。
+2. **arm64 的 rpm 不能在 x86_64 上打**：`rpmbuild` 有硬性跨架构保护
+   （试过 8 种宏覆盖 + 补 `buildarch_compat` 表，全部无效）。CI 上是原生 aarch64，
+   所以不存在这个问题。
+
+触发方式（工作流 `.github/workflows/build-linux-arm64.yml`）：
+
+```bash
+# 打 tag 直接触发，不必先合并
+git tag v0.4.4-arm64 && git push origin v0.4.4-arm64
+```
+
+工作流会跑完 19 步：工具链 → 隐私自检 → 解包 arm64 运行时 → 组装 → 架构审计 →
+打三种包 → 静态校验 → deb/rpm/AppImage 三套冒烟 → rpm 依赖解析 → 上传产物与报告。
 
 ## ⚖️ 许可与署名
 
