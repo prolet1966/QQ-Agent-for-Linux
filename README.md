@@ -176,20 +176,33 @@ arm64 走独立的 CI：在 **GitHub 原生 `ubuntu-24.04-arm` runner**（真 aa
 | 启动后可用性 | 控制台 **3210 端口已监听**，`GET /api/config` 返回 **200** 且为合法 JSON（19899 字节，UTF-8 不乱码） |
 | 数据目录落点 | 实测 `/home/runner/.local/share/qq-agent/data`，`/opt` 下无 `data`（程序与数据分离成立） |
 | 隐私红线 | 无 `snowluma/data`、`config`、`logs`、`.db`、`.log`、`community.key` |
-| CI 全流程 | **19/19 步通过**（构建 → 审计 → 三套打包 → 静态校验 → 三套冒烟 → 依赖解析） |
+| 沙箱降级回归 | **启动器侧 5/5 · AppRun 侧 5/5**（含 `nosuid` 挂载实测；两侧均为**硬门**，缺一即构建失败） |
+| CI 全流程 | **19 步执行全通过**（共 20 步，第 20 步为「仅失败时收集诊断」） |
 
 **arm64 冒烟的测试盲区（如实说明）**：未覆盖真实 QQ 客户端登录、扫码、
 SnowLuma 实际注入与 OneBot 消息收发（需要真实 QQ 账号与 Linux QQ 客户端，CI 环境不具备）；
 未覆盖多显示器、中文输入法、声音输出。
 
-### arm64 真机测试（志愿者实测）
+### arm64 真机测试（志愿者实测）→ 已修复
 
 > 上表的 CI 环境是**干净的原生 runner**。而在真实机器上（Apple Silicon 的 Parallels 虚拟机，
 > Kali Linux 2026.2 arm64），arm64 的 **AppImage 可正常启动，`.deb` 启动失败**。
 > 二者唯一实质差异是沙箱策略：AppImage 的启动器会检测 `chrome-sandbox` 是否**真正生效**
 > （setuid 位 + 属主 root + 所在挂载点非 `nosuid`）并降级 `--no-sandbox`，
-> 而 `.deb` / `.rpm` 启动器**只判 setuid 位**，在虚拟机的 `nosuid` 挂载下会误判为「沙箱可用」
-> 而触发 Chromium 的 FATAL。**已知问题，修复中**，详见 [鸣谢](#-鸣谢) 一节。
+> 而当时的 `.deb` / `.rpm` 启动器**只判 setuid 位**，在虚拟机的 `nosuid` 挂载下会误判为
+> 「沙箱可用」而触发 Chromium 的 FATAL。
+
+**已修复**：`.deb` / `.rpm` 启动器改用与 AppImage 一致的三重判据
+（`sandbox_reason()`：位 / 属主 / 挂载点全查），确认不可用时**显式降级 `--no-sandbox`
+并提示一次**（附可操作的修法；`nosuid` 挂载会明说「chmod 无效」并指向虚拟机这一限制）。
+
+> 这是**判定确实用不了才降级**，不是无条件关沙箱 —— 沙箱可用时行为与之前完全一致。
+
+修复已在原生 aarch64 runner 上验证（run `36432644402`，20 步全通过）。
+新增的 `test/41-launcher-sandbox-test.sh` 是**硬门**：它同时验判据本身
+（5 个用例）与「降级有没有真的接到 `exec` 上」—— 只写函数不接到 exec，降级就是个摆设，
+行为与修复前完全一样，而**这正是当初漏掉这个 bug 的那层空白**。
+测试里还留了一条对照断言，把「老逻辑在 `nosuid` 下确实会误判」钉死，免得后人当成玄学。
 
 ### 关于 `.rpm` 的验证方式（如实说明）
 
