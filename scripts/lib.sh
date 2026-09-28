@@ -23,7 +23,11 @@ set -euo pipefail
 # ── 版本与标识 ──
 APP_NAME="QQ Agent"
 PKG_NAME="qq-agent"
-APP_VERSION="0.4.4"
+# APP_VERSION 是【分发版本】：决定 deb/rpm/AppImage 的文件名与包元数据。
+# 它与 package.json 的 version（【应用版本】，即上游 Windows 版 V0.4.4）是两回事：
+# 本移植版只重新打包、不改应用代码，故 package.json 保持 0.4.4 不动。
+# 0.4.5 = 仅修复 deb/rpm 启动器的 Chromium 沙箱判据（见 scripts/03-stage.sh）。
+APP_VERSION="0.4.5"
 PKG_RELEASE="1"
 ELECTRON_VERSION="33.4.11"
 SNOWLUMA_VERSION="1.14.19"
