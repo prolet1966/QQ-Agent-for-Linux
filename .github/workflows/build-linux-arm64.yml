@@ -168,11 +168,10 @@ jobs:
           fi
           bash "$T" --arch arm64
 
-      # 40（AppRun 侧）此前从未在 CI 跑过，一直只在本机 WSL 验证过。
-      # 先按非阻断接入，拿一次真实 runner 的结果；确认稳定后再提升为硬门。
-      - name: 沙箱判据回归测试（AppRun 侧，非阻断，待转正）
+      # 40（AppRun 侧）已在原生 arm64 runner 上验证通过（run 36432644402，5/5），
+      # 从「非阻断待转正」提升为硬门。两侧判据都锁死，沙箱降级不会再无声退化。
+      - name: 沙箱判据回归测试（AppRun 侧）
         if: ${{ github.event.inputs.skip_smoke != 'true' }}
-        continue-on-error: true
         run: bash test/40-apprun-sandbox-test.sh --arch arm64
 
       - name: 真实安装 + 冒烟测试（deb）
