@@ -186,6 +186,20 @@ wsl -d Ubuntu -- bash /mnt/<盘>/.../build-scripts/collect-artifacts.sh      # �
   其 `EULA.md` 与 `PRIVACY.md` 随包分发在 `snowluma/` 目录内。
 - 本项目与腾讯 / QQ 官方**无隶属或授权关系**。请遵守《QQ 用户协议》及当地法律法规。
 
+## 💐 鸣谢
+
+- **[`@楚嘉墨是猫娘又怎样`](https://github.com/楚嘉墨是猫娘又怎样)** — arm64 **真机测试者**
+  提供了本移植版最关键的一次反馈。在 Apple Silicon 的 **Parallels 虚拟机（Kali Linux 2026.2 arm64）**
+  上实测三个安装包时发现：**AppImage 能正常启动，`.deb` 启动失败**，并如实回报了
+  「要不要装 Chromium」的疑问。
+  正是这条「同一台机器、同一份程序、只有沙箱策略不同」的对比，
+  把排查范围从十几个可能性收敛到一处：AppImage 的启动器会检测
+  `chrome-sandbox` 是否真正生效（setuid 位 + 属主 root + 所在挂载点非 `nosuid`）
+  并在失效时优雅降级 `--no-sandbox`，而 `.deb` / `.rpm` 的启动器只看 setuid 位，
+  在虚拟机的 `nosuid` 挂载下会误判为「沙箱可用」而硬撞 Chromium 的 FATAL。
+  静态审计（ELF 架构、权限位、依赖解析）无论如何都发现不了这类问题 ——
+  **只有真的在机器上跑一次才会暴露。** 衷心感谢！
+
 ## 🤝 反馈
 
 欢迎提交 Issue 反馈 Linux 平台上的兼容问题。

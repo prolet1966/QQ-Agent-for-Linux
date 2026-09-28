@@ -1,0 +1,28 @@
+# ── 构建产物（体积大、可由脚本重建，绝不入库）──
+cache/
+stage/
+stage-*/
+out/
+.anchor-test/
+.anchor-test-win/
+
+# ── CI 输入：清洗过的应用代码 tar ──
+# 这是 `03-stage.sh --app-tarball` 的产出，**已套用隐私排除清单并逐条核对过**
+# （411 条目，无 .db/.log/snowluma/config/community.key，无密钥字面量）。
+#
+# ⚠️ 这一行**只是防止误加新文件**：`ci-input/app-code.tar.gz` 本身是**刻意跟踪并提交**的
+#    —— CI 需要它来组装应用树。已跟踪的文件不受 .gitignore 影响，所以它照常工作。
+#
+# 为什么不直接让 CI 用仓库自己的 `src/` `ui/` 等目录做输入：
+#   这个仓库同时还放着 build-scripts/ 与 docs/，而 docs/ 里可能有**不该入包**的内容
+#   （上游甚至专门写了 audit-doc-leaks.py 做这类检查）。用一个边界清楚的快照 tar
+#   当输入最稳：入包内容只可能是那 411 个条目。
+#
+# ⚠️ 绝不要把原始的 `E:\Program Files\QQ Agent\...\resources\app` 整棵当输入：
+#    那里面有 QQ 登录态、私聊消息库、WebUI 令牌、API Key 明文。
+ci-input/
+
+# ── 编辑器 / 系统 ──
+.DS_Store
+Thumbs.db
+*.swp
