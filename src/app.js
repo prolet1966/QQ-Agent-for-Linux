@@ -25,6 +25,7 @@ import { loadPlugins, watchPlugins } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
 import { extractCandidateUrls, dispatchMediaLinks } from './media-links.js';
 import { createRoutes } from './routes.js';
+import { createPeerMonitor } from './peer.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -1287,7 +1288,13 @@ export function createApp({ log = console.log } = {}) {
   // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password / cookie …
   // ⚠️ cookie 必须在内：media-download 插件的 bilibiliCookie / douyinCookie
   //    是登录凭据，曾经 pattern 不认导致 /api/config 明文返回。
-  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|communitykey|cookie|secret|password|privatekey|private_key)/i;
+  // ⚠️ sessdata 必须在内：music-skill 的 B 站 SESSDATA 也是登录凭据，字段名不含
+  //    任何既有模式（曾经只在 configSchema 标了 secret，只护住 /api/skills 列表，
+  //    /api/config 全量配置仍会明文返回）。
+  // ⚠️ token 必须在内：server.peer.token（对端控制台令牌）与 server.token（本实例
+  //    控制台令牌）此前都被当作普通字段明文回传。server.token 只有持令牌者才读得到
+  //    还说得过去；peer.token 任意打开主控制台的页面都能看到对端令牌 —— 纯泄露。
+  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|communitykey|cookie|secret|password|privatekey|private_key|sessdata|token)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
 
@@ -1371,6 +1378,12 @@ export function createApp({ log = console.log } = {}) {
     return { ...rest, apiKey: '', hasKey: Boolean(String(apiKey ?? '').trim()) };
   }
 
+  // ── 对端实例联动（server.peer）────────────────────────────────────────
+  // 只读状态互通（方案 A）。监测器在 app.start() 里启动：按配置周期 GET 对端
+  // /api/status → 白名单净化 → emit('peer-status') SSE 推送 + 经 /api/status 的
+  // peer 字段给常规轮询兜底。配置未启用时 probe 直接返回 configured:false。
+  const peerMonitor = createPeerMonitor({ getConfig, emit, log });
+
   // 声明式路由表（src/routes.js）：把所有依赖一次性注入。
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
@@ -1384,6 +1397,7 @@ export function createApp({ log = console.log } = {}) {
     qqPortableStatus, qqPortableLogs, launchPortableQQ, stopPortableQQ,
     visionScan, isPortOpen,
     buildUsageStats, buildUsageBreakdown,
+    peerSnapshot: peerMonitor.snapshot,
     reloadSkills
   });
 
@@ -1571,6 +1585,10 @@ export function createApp({ log = console.log } = {}) {
     // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
     startTelemetryLoop(log);
 
+    // 对端实例联动（server.peer）：配置启用才真正开始轮询（probe 内部按配置
+    // 短路，未启用只推一条 configured:false）。放在 listen 成功之后。
+    peerMonitor.start();
+
     // 会话索引后台对账：启动读的是毫秒级缓存，这里异步补扫磁盘修正差异
     // （缓存缺失的新文件/外部删除的文件）。不 await —— 不挡任何启动步骤。
     sessions.reconcileInBackground();
@@ -1742,6 +1760,8 @@ export function createApp({ log = console.log } = {}) {
     sseClients.clear();
     onebot.close();
     server.close();
+    // 对端监测器：停止轮询（下次 start 会重开）
+    try { peerMonitor.stop(); } catch { /* ignore */ }
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
     // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
     // 下次启动会读到完整文件。

@@ -1640,6 +1640,21 @@ async function saveConfig({ quiet = false } = {}) {
       autoStart: chk('#cfg-autostart', !!c.server?.autoStart),
       closeToTray: chk('#cfg-closetray', c.server?.closeToTray !== false)
     };
+    // 对端实例（server.peer）：令牌与 OneBot 令牌同规则 —— 留空/****** = 不变，明文 = 覆盖。
+    // ⚠️ 不展开 c.server.peer：那是脱敏值（token 已删、还挂着 hasToken 等标记），
+    //    展开会把 hasToken 之类的伪字段写回磁盘。逐字段重建，顺带清掉旧版遗留的
+    //    port/wsUrl（新语义按 profile 推导，见 docs/peer-relay-design.md §3）。
+    const p = c.server?.peer || {};
+    const enteredPeerToken = val('#cfg-peer-token', '').trim();
+    patch.server.peer = {
+      enabled: chk('#cfg-peer-enabled', !!p.enabled),
+      name: val('#cfg-peer-name', p.name || '').trim(),
+      profile: val('#cfg-peer-profile', p.profile || '').trim(),
+      httpUrl: val('#cfg-peer-httpurl', p.httpUrl || '').trim(),
+      pollMs: Number(p.pollMs) || 15000,
+      timeoutMs: Number(p.timeoutMs) || 4000,
+      ...(enteredPeerToken && enteredPeerToken !== '******' ? { token: enteredPeerToken } : {})
+    };
     patch.ui = {
       ...(c.ui || {}),
       // 主题在点选项时就已应用并写入 localStorage，这里把它一并存到后端以便跨设备保留

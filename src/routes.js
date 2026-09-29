@@ -54,6 +54,7 @@ export function createRoutes(deps) {
     qqPortableStatus, qqPortableLogs, launchPortableQQ, stopPortableQQ,
     visionScan,
     buildUsageStats, buildUsageBreakdown,
+    peerSnapshot,
     reloadSkills
   } = deps;
 
@@ -131,7 +132,9 @@ export function createRoutes(deps) {
           webSearchCount: usage.webSearchCount || 0,
           paused: orchestrator.paused,
           pauseReason: orchestrator.pauseReason ?? null,
-          dataDir: DATA_DIR
+          dataDir: DATA_DIR,
+          // 对端实例状态（server.peer 监测器的最近一次快照，可能为 null）
+          peer: typeof peerSnapshot === 'function' ? peerSnapshot() : null
         });
       }
     },
@@ -1625,6 +1628,120 @@ export function createRoutes(deps) {
         }
         emit('chat-update', '*');
         return json(res, 200, { ok: true, paused: false, marked });
+      }
+    },
+
+    // ── 数据面板（panel.* 能力通道）────────────────────────────────────
+    // 面板 = 只读数据看板。任何插件/技能实现 `panel.<key>` 能力（统一结构
+    // { title, summary:[{label,value}], sections:[{type,...}] }）就会经由这组
+    // 端点自动暴露给控制台，核心不改一行 —— 这就是面板的扩展通道（全兼容：
+    // 旧插件没有 panel.* 能力 → 不在列表里；未启用/未加载 → 不可用原因透传）。
+    // 结构规格与 section 类型见 docs/panels-interface.md。
+    {
+      method: 'GET', pattern: '/api/panels',
+      handler: async ({ res, json }) => {
+        const ctx = skillRuntimeContext();
+        const panels = [];
+        for (const s of skillManager.list()) {
+          const caps = [...new Set([
+            ...(s.implementedCapabilities || []),
+            ...(s.capabilities || [])
+          ])];
+          for (const cap of caps) {
+            if (!/^panel\.[a-z0-9_-]+$/i.test(cap)) continue;
+            const key = cap.slice('panel.'.length).toLowerCase();
+            const providers = skillManager.getCapabilityProviders(cap, ctx);
+            const expl = skillManager.explainCapability(cap, ctx);
+            panels.push({
+              key,
+              name: s.name || key,
+              source: s.id,
+              kind: s.kind || null,
+              loaded: !!s.loaded,
+              enabled: !!s.enabled,
+              active: !!s.active,
+              available: expl.available,
+              usable: providers.length > 0,
+              reason: providers.length > 0 ? '' : (expl.reason || '不可用')
+            });
+          }
+        }
+        panels.sort((a, b) => {
+          if (a.loaded !== b.loaded) return b.loaded - a.loaded;
+          if (a.usable !== b.usable) return b.usable - a.usable;
+          return String(a.key).localeCompare(String(b.key));
+        });
+        // 同一面板 key 多个提供者并发时只留一个：优先「生效中」的，否则留第一个。
+        // （同 id 模块可能同时存在于 skills/ 与 plugins/，注册表只保留后注册者，
+        //   防御性去重避免侧栏出现两个同名面板。）
+        const deduped = [];
+        const seenKeys = new Map();
+        for (const p of panels) {
+          const prev = seenKeys.get(p.key);
+          if (!prev) {
+            seenKeys.set(p.key, p);
+            deduped.push(p);
+          } else if (!prev.usable && p.usable) {
+            seenKeys.set(p.key, p);
+            deduped[deduped.indexOf(prev)] = p;
+          }
+          // 其余情况保留先出现的（可用的先到就稳赢，避免同 key 抖动）
+        }
+        return json(res, 200, { ok: true, panels: deduped });
+      }
+    },
+    {
+      method: 'GET', pattern: /^\/api\/panels\/([a-z0-9_-]+)$/i,
+      handler: async ({ res, json, url, match }) => {
+        const key = String(match[1] || '').toLowerCase();
+        const cap = 'panel.' + key;
+        // 面板数据通常很大（榜单/搜索表），不允许缓存
+        res.setHeader('Cache-Control', 'no-store');
+        let args = {};
+        const rawArgs = url.searchParams.get('args');
+        if (rawArgs) {
+          try { args = JSON.parse(rawArgs); } catch { return json(res, 400, { ok: false, key, error: 'args 不是合法 JSON' }); }
+          if (!args || typeof args !== 'object' || Array.isArray(args)) return json(res, 400, { ok: false, key, error: 'args 必须为 JSON 对象' });
+        }
+        const ctx = skillRuntimeContext();
+        const fns = skillManager.getCapabilityProviders(cap, ctx);
+        if (!fns.length) {
+          const expl = skillManager.explainCapability(cap, ctx);
+          return json(res, 404, { ok: false, key, reason: expl.reason || `没有生效中的 ${cap} 提供者` });
+        }
+        try {
+          const data = await fns[0].fn(args);
+          return json(res, 200, { ok: true, key, data: data ?? null });
+        } catch (e) {
+          return json(res, 500, { ok: false, key, error: String(e?.message ?? e) });
+        }
+      }
+    },
+
+    {
+      // 面板写操作通道：panel 结构里的 actions 经此落点执行。
+      // 约定：capability 必须为 `action.*` 前缀（核心 HTTP 放行的写白名单，插件按这个
+      // 前缀自行约束动作），且必须有生效中的提供者 —— 与面板读通道对称，见 docs/panels-interface.md。
+      method: 'POST', pattern: '/api/action',
+      handler: async ({ req, res, json }) => {
+        const body = await bodyOf(req);
+        const cap = String(body?.capability || '');
+        if (!/^action\.[a-z0-9_.-]+$/i.test(cap)) {
+          return json(res, 400, { ok: false, error: 'capability 必须形如 action.<name>（写白名单前缀）' });
+        }
+        const args = body?.args && typeof body.args === 'object' && !Array.isArray(body.args) ? body.args : {};
+        const ctx = skillRuntimeContext();
+        const fns = skillManager.getCapabilityProviders(cap, ctx);
+        if (!fns.length) {
+          const expl = skillManager.explainCapability(cap, ctx);
+          return json(res, 404, { ok: false, capability: cap, reason: expl.reason || `没有生效中的 ${cap} 提供者` });
+        }
+        try {
+          const result = await fns[0].fn(args);
+          return json(res, 200, { ok: true, capability: cap, result: result ?? null });
+        } catch (e) {
+          return json(res, 500, { ok: false, capability: cap, error: String(e?.message ?? e) });
+        }
       }
     },
 

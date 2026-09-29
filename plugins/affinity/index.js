@@ -12,13 +12,14 @@
 //   消费（防孤儿能力，见 plugin-development.md §5）。
 
 import { DEFAULT_CONFIG, mergeConfig } from './lib/aff-schema.js';
-import { tierOf, tierIdOf, scoreFromRaw, responseProfileOf, rebirthPhrase } from './lib/aff-score.js';
+import { TIERS, tierOf, tierIdOf, scoreFromRaw, responseProfileOf, rebirthPhrase } from './lib/aff-score.js';
 import { AffinityStore } from './lib/aff-store.js';
 import { applyInbound, materializeState as materializeOf } from './lib/aff-apply.js';
 // 数据根目录：必须与正在运行的那份进程完全一致（多实例下插件自己拼会算错根目录，
 // 表现是「实例 #2 的数据写进 #1 的目录」，两个机器人互相污染且极难发现）。
 // 复用核心导出，唯一真源 —— 官方 conversation-memory 插件同款做法。
 import { DATA_DIR } from '../../src/config.js';
+import fs from 'node:fs';
 import path from 'node:path';
 
 
@@ -69,6 +70,88 @@ export function dispose() {
 function state() {
   if (!store) { store = new AffinityStore({ dataDir }); }
   return store;
+}
+
+const TIER_COLORS = ['#94a3b8', '#7cc4f2', '#4ade80', '#fbbf24', '#fb923c', '#f87171'];
+const BUCKET_STEP = ['<30', '30-49', '50-69', '70-89', '90-99', '100'];
+
+// ── 历史档案叠加：读取迁移快照 <dataDir>/affinity/state.json（可选）──────────
+// 好感度档案：961 人（2026-09-10~09-23）由 tools/affinity-report.mjs 生成。
+// 现网 live 存储只有运行期累积的记录（通常很少），图表直接画会很难看 ——
+// 因此面板在有快照时**叠加**它：图表用历史档案，排行用现网 live（更真实）。快照缺失时自动降级。
+let snapCache = null;
+let snapCacheAt = 0;
+function snapshotStats() {
+  try {
+    const f = path.join(DATA_DIR, 'affinity', 'state.json');
+    const st = fs.statSync(f);
+    if (snapCache && st.mtimeMs === snapCacheAt) return snapCache;
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const people = (raw && typeof raw.people === 'object') ? raw.people : {};
+    const peopleCount = Object.keys(people).length;
+    if (!peopleCount) { snapCache = null; return null; }
+    const tierCount = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    const buckets = { '<30': 0, '30-49': 0, '50-69': 0, '70-89': 0, '90-99': 0, '100': 0 };
+    const top = [];
+    for (const [personId, v] of Object.entries(people)) {
+      const tid = Number(v.tierId ?? tierIdOf(v.score));
+      if (tid in tierCount) tierCount[tid] += 1;
+      const s = Number(v.score) || 0;
+      if (s >= 100) buckets['100'] += 1;
+      else if (s >= 90) buckets['90-99'] += 1;
+      else if (s >= 70) buckets['70-89'] += 1;
+      else if (s >= 50) buckets['50-69'] += 1;
+      else if (s >= 30) buckets['30-49'] += 1;
+      else buckets['<30'] += 1;
+      top.push({ personId, name: String(v.name || ''), score: s, tierId: tid, talkDays: v.talkDays, msgs: v.msgs, atBot: v.atBot, lastTalk: v.lastTalk });
+    }
+    top.sort((a, b) => (b.score - a.score) || (b.msgs - a.msgs));
+    snapCache = {
+      mtime: st.mtimeMs,
+      counts: raw.counts,
+      eventDayRange: raw.eventDayRange,
+      generatedAt: raw.generatedAt,
+      peopleCount,
+      tierCount,
+      buckets,
+      top: top.slice(0, 20),
+    };
+    return snapCache;
+  } catch { snapCache = null; return null; }
+}
+
+/** 现网 live 记录：统一成面板行（materialize 出分数）。 */
+function liveRows() {
+  const c = mergeConfig(cfg());
+  const all = state().loadAll();
+  for (const s of all) materializeOf(s, c);
+  return all.map((s) => ({
+    personId: String(s.person_id ?? ''),
+    score: Math.round(s.score ?? 55),
+    tier: tierOf(s.score ?? 55, c),
+    familiarity: s.familiarity ?? 0,
+    rebirth: s.rebirth?.count ?? 0,
+    lastTalkAt: s.last_talk_at || null,
+    events: Array.isArray(s.events) ? s.events.length : 0,
+  }));
+}
+
+/** 检索：QQ 前缀（纯数字）或昵称关键字（按「现网优先、档案兜底」排序）。 */
+function searchPeople(q, limit = 50) {
+  const kw = String(q ?? '').trim();
+  const num = /^\d+$/.test(kw);
+  const rows = [];
+  for (const r of liveRows()) {
+    if (!kw || (num ? r.personId.startsWith(kw) : true)) rows.push({ personId: r.personId, name: '', source: '现网', score: r.score, tierName: r.tier.name });
+  }
+  for (const d of snapshotStats()?.top ?? []) {
+    if (!kw || (num ? d.personId.startsWith(kw) : String(d.name || '').includes(kw))) {
+      rows.push({ personId: d.personId, name: d.name, source: '档案', score: d.score, tierName: TIERS[Number(d.tierId) ?? tierIdOf(d.score)]?.name || '熟客' });
+    }
+  }
+  const seen = new Set();
+  const uni = rows.filter((r) => (seen.has(r.personId) ? false : (seen.add(r.personId), true))).sort((a, b) => b.score - a.score);
+  return uni.slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
 }
 
 export const providers = {
@@ -191,34 +274,106 @@ export const providers = {
     return { ok: false, error: '未知操作 ' + op + '（支持 adjust / rebirth / query）' };
   },
 
-  /** 控制台「扩展」面板数据（只读）：好感度排行 + 档位分布。 */
-  'panel.affinity': () => {
+  /**
+   * 汇总统计（面板/控制台用）：现网人数、历史档案分布、TOP 榜。
+   * api.capability('affinity.stats')。控制台是档位名唯一合法的出现位置，直接吐内部档位。
+   */
+  'affinity.stats': () => {
+    const snap = snapshotStats();
+    const live = liveRows();
+    return {
+      ok: true,
+      live: live.length,
+      snapshot: snap ? { people: snap.peopleCount, counts: snap.counts, eventDayRange: snap.eventDayRange } : null,
+      liveTop: [...live].sort((a, b) => b.score - a.score).slice(0, 20),
+      top: snap?.top ?? [],
+    };
+  },
+
+  /**
+   * 人员检索（面板搜索/控制台）：QQ 号前缀或昵称关键字，现网优先、档案兜底。
+   * api.capability('affinity.people', { q, limit })。
+   */
+  'affinity.people': ({ q = '', limit = 50 } = {}) => {
+    const rows = searchPeople(q, limit);
+    return { ok: true, total: rows.length, rows };
+  },
+
+  /** 控制台「扩展」面板数据（只读）：历史档案图表 + 现网排行 + 搜索；actions = 写通道。 */
+  'panel.affinity': (args = {}) => {
     const c = mergeConfig(cfg());
-    const all = state().loadAll();
-    for (const s of all) materializeOf(s, c);
-    const tiers = {};
-    for (const s of all) {
-      const t = tierOf(s.score ?? 55, c);
-      tiers[t.name] = (tiers[t.name] ?? 0) + 1;
+    const snap = snapshotStats();
+    const live = liveRows();
+
+    const summary = [
+      { label: '历史档案', value: snap ? `${snap.peopleCount} 人` : '无' },
+      { label: '现网记录', value: `${live.length} 人` },
+      { label: '数据区间', value: snap && snap.eventDayRange ? `${snap.eventDayRange[0]} ~ ${snap.eventDayRange[1]}` : '-' },
+      { label: '注入提示词', value: c.inject !== false ? '开' : '关' },
+      { label: '成功注入档', value: c.inject === false ? '关' : (c.injectOnlyWhenMeaningful !== false ? '非常客档' : '全部') },
+      { label: 'set_feeling 写权限', value: c.toolWrite ? '开' : '关' },
+    ];
+
+    const sections = [];
+    if (snap) {
+      sections.push({
+        type: 'donut', title: `档位分布（历史档案 ${snap.peopleCount} 人）`,
+        data: TIERS.map((t, i) => ({ label: t.name, value: snap.tierCount[t.id] ?? 0, color: TIER_COLORS[i] ?? '#9ca3af' })).filter((d) => d.value > 0),
+      });
+      sections.push({
+        type: 'bars', title: '分数段分布（历史档案）',
+        data: Object.entries(snap.buckets).map(([label, value], i) => ({
+          label, value,
+          color: `hsl(${120 - i * 21} 70% 55%)`,
+        })),
+      });
+      if (snap.top.length) {
+        sections.push({
+          type: 'table', title: '历史档案 Top 20（按分数）',
+          columns: ['#', '昵称', 'QQ', '分数', '档位', '发言/点名', '最近'],
+          rows: snap.top.map((p, i) => [
+            String(i + 1),
+            p.name || '(无昵称)',
+            p.personId,
+            String(Math.round(p.score)),
+            TIERS[Number(p.tierId) ?? tierIdOf(p.score)]?.name || '熟客',
+            `${p.msgs ?? 0} / ${p.atBot ?? 0}`,
+            p.lastTalk || '-',
+          ]),
+        });
+      }
     }
-    const top = [...all].sort((a, b) => (b.score ?? 55) - (a.score ?? 55)).slice(0, 30);
+
+    const liveSorted = [...live].sort((a, b) => (b.score - a.score) || (b.events - a.events));
+    sections.push({
+      type: 'table', title: '现网好感度排行（前 30）',
+      columns: ['QQ', '分数', '档位', '熟悉度', '轮回', '事件', '最近'],
+      rows: liveSorted.slice(0, 30).map((r) => [
+        r.personId || '-',
+        String(r.score),
+        r.tier.name,
+        String(r.familiarity ?? 0),
+        String(r.rebirth ?? 0),
+        String(r.events ?? 0),
+        r.lastTalkAt ? new Date(r.lastTalkAt).toLocaleDateString('zh-CN') : '-',
+      ]),
+    });
+
+    // 控制台搜索：命中用表格段呈现
+    const q = String(args?.q ?? '').trim();
+    if (q) {
+      const found = searchPeople(q, 50);
+      sections.push({
+        type: 'table', title: `搜索「${q}」（显示前 ${found.length} 条，现网优先）`,
+        columns: ['来源', '昵称', 'QQ', '分数', '档位'],
+        rows: found.map((r) => [r.source, r.name || '-', r.personId, String(Math.round(r.score)), r.tierName]),
+      });
+    }
+
     return {
       title: '好感度',
-      summary: [
-        { label: '记录人数', value: String(all.length) },
-        { label: '注入提示词', value: c.inject !== false ? '开' : '关' },
-        { label: '只在有意义时注入', value: c.injectOnlyWhenMeaningful !== false ? '是（熟客档省 token）' : '否' },
-        { label: 'set_feeling 写权限', value: c.toolWrite ? '开' : '关' },
-        ...Object.entries(tiers).map(([k, v]) => ({ label: k, value: String(v) })),
-      ],
-      sections: top.length ? [{
-        type: 'table', title: '好感度排行（前 30）',
-        columns: ['QQ', '分数', '档位', '熟悉度', '轮回', '最近'],
-        rows: top.map((s) => {
-          const t = tierOf(s.score ?? 55, c);
-          return [String(s.person_id ?? '-'), String(Math.round(s.score ?? 55)), t.name, String(s.familiarity ?? 0), String(s.rebirth?.count ?? 0), s.last_talk_at ? new Date(s.last_talk_at).toLocaleDateString('zh-CN') : '-'];
-        }),
-      }] : [{ type: 'note', title: '还没有数据', text: '好感度在收到群消息后自动累积（词表反馈，零 token）。' }],
+      summary,
+      sections,
       // 控制台交互（action.* = 核心 HTTP 放行的写白名单；具体实现在 action.affinity）
       actions: [
         {

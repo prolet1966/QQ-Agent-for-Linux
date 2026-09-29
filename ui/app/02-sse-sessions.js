@@ -123,6 +123,12 @@ function connectSSE() {
     if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
   });
   es.addEventListener('status', () => refreshStatus());
+  es.addEventListener('peer-status', (ev) => {
+    let d = {};
+    try { d = JSON.parse(ev.data || '{}'); } catch { /* 坏数据跳过本条，不断流 */ }
+    state.peer = d || null;
+    paintPeerStatus(state.peer);
+  });
   es.addEventListener('snowluma-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
   es.addEventListener('qq-portable-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
   es.addEventListener('qq-portable-log', () => { if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });

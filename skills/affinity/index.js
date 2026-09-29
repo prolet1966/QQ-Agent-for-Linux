@@ -317,7 +317,142 @@ export const providers = {
       grudgeLevel: p.grudgeLevel,
       stats: { msgs: p.msgs, rounds: p.rounds, atBot: p.atBot, talkDays: p.talkDays, firstTalk: p.firstTalk, lastTalk: p.lastTalk }
     };
-  }
+  },
+
+  /**
+   * 汇总统计（面板/控制台用）：档案数控、档位分布、分数段分布、好感度 Top 20。
+   * api.capability('affinity.stats')。
+   * 说明：控制台是**档位名唯一合法的出现位置**（铁律②"档位名只在控制台出现"），
+   * 所以这里直接吐内部档位名/分数，不经过语气映射。
+   */
+  'affinity.stats': () => {
+    const s = loadState();
+    if (!s) return { ok: false, reason: '缺少 <数据目录>/affinity/state.json，无法生成统计。' };
+    const people = s.people || {};
+    const tierCount = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    const buckets = { '<30': 0, '30-49': 0, '50-69': 0, '70-89': 0, '90-99': 0, '100': 0 };
+    for (const v of Object.values(people)) {
+      const tid = Number(v.tierId ?? tierIdOf(v.score));
+      if (tid in tierCount) tierCount[tid] += 1;
+      const sc = Number(v.score) || 0;
+      if (sc >= 100) buckets['100'] += 1;
+      else if (sc >= 90) buckets['90-99'] += 1;
+      else if (sc >= 70) buckets['70-89'] += 1;
+      else if (sc >= 50) buckets['50-69'] += 1;
+      else if (sc >= 30) buckets['30-49'] += 1;
+      else buckets['<30'] += 1;
+    }
+    const top = Object.entries(people)
+      .map(([personId, v]) => ({
+        personId,
+        name: v.name ? String(v.name) : '',
+        score: Number(v.score) || 0,
+        tierId: Number(v.tierId ?? tierIdOf(v.score)),
+        tierName: v.tierName || TIERS[Number(v.tierId ?? tierIdOf(v.score))]?.name || '熟客',
+        msgs: v.msgs, rounds: v.rounds, atBot: v.atBot, talkDays: v.talkDays, lastTalk: v.lastTalk, grudgeLevel: v.grudgeLevel || 0,
+      }))
+      .sort((a, b) => (b.score - a.score) || (b.msgs - a.msgs))
+      .slice(0, 20);
+    return {
+      ok: true,
+      counts: s.counts || { people: Object.keys(people).length, events: 0, snapshots: 0, withGrudge: 0 },
+      eventDayRange: s.eventDayRange || null,
+      generatedAt: s.generatedAt || null,
+      tierCount,
+      buckets,
+      top,
+    };
+  },
+
+  /**
+   * 人员检索（面板搜索/控制台）：QQ 号前缀（纯数字）或昵称关键字，返回扁平列表。
+   * api.capability('affinity.people', { q, limit })。
+   */
+  'affinity.people': ({ q = '', limit = 50 } = {}) => {
+    const s = loadState();
+    if (!s) return { ok: false, reason: '缺少 <数据目录>/affinity/state.json，无法检索。' };
+    const kw = String(q ?? '').trim();
+    const all = Object.entries(s.people || {})
+      .map(([personId, v]) => ({ personId, name: v.name ? String(v.name) : '', score: Number(v.score) || 0 }))
+      .filter((r) => {
+        if (!kw) return true;
+        if (/^\d+$/.test(kw)) return r.personId.startsWith(kw);
+        return r.name.includes(kw);
+      })
+      .sort((a, b) => (b.score - a.score)
+        || (a.personId.localeCompare(b.personId)));
+    const rows = all.slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
+    return { ok: true, total: all.length, rows };
+  },
+
+  /**
+   * 好感度数据面板（控制台只读，panel. 前缀约定）。统一结构：
+   * { title, summary:[{label,value}], sections:[{type,...}] }。
+   * 入参 { q? }：非空时追加「搜索」表格段，用于控制台搜索框。
+   * 形状规格见 docs/panels-interface.md。
+   */
+  'panel.affinity': (args = {}) => {
+    const stats = providers['affinity.stats']();
+    if (!stats.ok) {
+      return {
+        title: '好感度',
+        summary: [{ label: '数据', value: '未加载' }],
+        sections: [{ type: 'note', title: '为什么看不到数据', text: stats.reason }],
+      };
+    }
+    const TIER_COLORS = ['#94a3b8', '#7cc4f2', '#4ade80', '#fbbf24', '#fb923c', '#f87171'];
+    const summary = [
+      { label: '档案人数', value: String(stats.counts.people) },
+      { label: '事件数', value: String(stats.counts.events ?? 0) },
+      { label: '快照', value: String(stats.counts.snapshots ?? 0) },
+      { label: '冷战', value: String(stats.counts.withGrudge ?? 0) },
+      { label: '数据区间', value: stats.eventDayRange ? `${stats.eventDayRange[0]} ~ ${stats.eventDayRange[1]}` : '-' },
+    ];
+    const sections = [
+      {
+        type: 'donut', title: '档位分布',
+        data: TIERS.map((t) => ({
+          label: t.name, value: stats.tierCount[t.id] ?? 0, color: TIER_COLORS[t.id] ?? '#9ca3af',
+        })).filter((d) => d.value > 0),
+      },
+      {
+        type: 'bars', title: '分数段分布',
+        data: Object.entries(stats.buckets).map(([label, value], i) => ({
+          label, value,
+          color: `hsl(${120 - i * 21} 70% 55%)`,   // 绿→红 渐变：高分段冷色、低分段警示色
+        })),
+      },
+      {
+        type: 'table', title: '好感度 TOP 20（按分数）',
+        columns: ['#', '昵称', 'QQ', '分数', '档位', '活跃(天)', '发言/对话/点名', '最近'],
+        rows: stats.top.map((p, i) => [
+          String(i + 1),
+          p.name || '(无昵称)',
+          p.personId,
+          String(p.score),
+          p.tierName,
+          String(p.talkDays ?? 0),
+          `${p.msgs ?? 0} / ${p.rounds ?? 0} / ${p.atBot ?? 0}`,
+          p.lastTalk || '-',
+        ]),
+      },
+    ];
+    // 控制台搜索：命中用表格段呈现（不返回内部字段名以外的任何东西）
+    const q = String(args?.q ?? '').trim();
+    if (q) {
+      const people = providers['affinity.people']({ q, limit: 50 });
+      if (!people.ok) {
+        sections.push({ type: 'note', title: '搜索不可用', text: people.reason });
+      } else {
+        sections.push({
+          type: 'table', title: `搜索「${q}」（命中 ${people.total} 人，显示前 ${people.rows.length}）`,
+          columns: ['昵称', 'QQ', '分数'],
+          rows: people.rows.map((r) => [r.name || '(无昵称)', r.personId, String(r.score)]),
+        });
+      }
+    }
+    return { title: '好感度', summary, sections };
+  },
 };
 
 // ------------------------------------------------------------------- hooks --

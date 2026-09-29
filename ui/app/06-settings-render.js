@@ -1024,6 +1024,47 @@ function renderDesktopSection(c) {
       </div></div>`;
 }
 
+/**
+ * 对端实例（server.peer）状态渲染。
+ * peer 形状 = 后端 createPeerMonitor 的 latest 快照（/api/status.peer 或 SSE peer-status）。
+ */
+function peerStatusHtml(peer) {
+  if (!peer) {
+    return '<span class="text-dim">未配置对端（设置页「对端实例」里启用 server.peer 后生效）</span>';
+  }
+  if (peer.configured === false) {
+    return '<span class="text-dim">对端监测未启用（server.peer.enabled = false）</span>';
+  }
+  if (peer.valid === false) {
+    return `<span class="peer-err">⚠️ 配置无效：${esc(peer.error || '未知原因')}</span>`;
+  }
+  if (peer.ok) {
+    const st = peer.status || {};
+    const u = st.onebot?.user;
+    const ob = st.onebot?.connected
+      ? `OneBot 在线${u && u.nickname ? `（${esc(u.nickname)}${u.userId ? ' · ' + esc(u.userId) : ''}）` : ''}`
+      : 'OneBot 未连接';
+    const sl = st.snowlumaRunning ? 'SnowLuma 运行中' : 'SnowLuma 未运行';
+    const sess = st.orchestrator?.activeSessions || 0;
+    return `<span class="peer-ok">✅ 在线（${esc(peer.name || '对端')}）· ${ob} · ${sl} · 会话 ${sess}</span>`;
+  }
+  const t = peer.at ? new Date(peer.at).toLocaleTimeString('zh-CN') : '';
+  return `<span class="peer-err">⛔ 对端无响应：${esc(peer.error || '未知错误')}${t ? `（${t} 起）` : ''}</span>`;
+}
+
+/** 设置页在场时，把最新对端快照刷到 #peer-status-line / #peer-status-hint。 */
+function paintPeerStatus(peer) {
+  const line = $('#peer-status-line');
+  if (!line) return;   // 不在设置页，等下次渲染时由 peerStatusHtml 兜底
+  line.innerHTML = peerStatusHtml(peer || null);
+  const hint = $('#peer-status-hint');
+  if (hint) {
+    hint.textContent = peer?.at
+      ? `最近探测：${new Date(peer.at).toLocaleTimeString('zh-CN')}`
+      : '';
+  }
+}
+
 function renderOnebotSection(c) {
   return `
     <h3 id="settings-onebot">OneBot（SnowLuma）</h3>
@@ -1050,7 +1091,28 @@ function renderOnebotSection(c) {
           <button class="btn btn-small" id="cfg-obhttptoken-toggle" type="button">显示</button>
         </div></div>
     </div>
-    <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
+    <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>
+
+    <div class="settings-divider"></div>
+    <h3 id="settings-peer">对端实例（server.peer）</h3>
+    <div class="hint" style="margin-bottom:10px">把同机另一个多开实例设为对端后，这里只读展示它的在线状态（不转发消息）。
+      端口规则与 QQ_AGENT_PROFILE 一致：#N 的 HTTP 控制台 = 3210 + 100N。详细见 docs/multi-instance.md。</div>
+    <div class="checkbox-row"><input type="checkbox" class="sw" id="cfg-peer-enabled" ${c.server?.peer?.enabled ? 'checked' : ''} />
+      <label for="cfg-peer-enabled">启用对端实例状态监测（默认每 15 秒探测一次）</label></div>
+    <div class="field-row">
+      <div class="field"><label>对端名称</label><input type="text" id="cfg-peer-name" value="${esc(c.server?.peer?.name || '')}" placeholder="如 Asaba" autocomplete="off" /></div>
+      <div class="field"><label>对端实例号 profile</label><input type="text" id="cfg-peer-profile" value="${esc(c.server?.peer?.profile || '')}" placeholder="如 2" autocomplete="off" /></div>
+    </div>
+    <div class="field"><label>对端 HTTP 地址（留空 = 按 profile 推导为 http://127.0.0.1:3210+100N）</label>
+      <input type="text" id="cfg-peer-httpurl" value="${esc(c.server?.peer?.httpUrl || '')}" placeholder="http://127.0.0.1:3510" autocomplete="off" /></div>
+    <div class="field"><label>对端控制台令牌（对端 server.token 非空时才需要；本机探测请留空）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-peer-token" value="${esc(c.server?.peer?.hasToken ? '******' : '')}" placeholder="输入新令牌可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="cfg-peer-token-toggle" type="button">显示</button>
+      </div></div>
+    <div class="field"><label>对端状态</label>
+      <div id="peer-status-line">${peerStatusHtml(state.peer)}</div>
+      <div class="hint" id="peer-status-hint"></div></div>`;
 }
 
 /**

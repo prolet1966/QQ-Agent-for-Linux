@@ -8,7 +8,10 @@
   "author": "ported from v0.3 affinity module",
   "enabledByDefault": true,
   "capabilities": [
-    "affinity.query"
+    "affinity.query",
+    "affinity.stats",
+    "affinity.people",
+    "panel.affinity"
   ],
   "requires": [],
   "settings": {

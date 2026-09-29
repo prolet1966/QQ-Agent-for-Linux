@@ -26,6 +26,9 @@ async function refreshStatus() {
     state.paused = s.paused;
     state.pauseReason = s.pauseReason;
     state.dataDir = s.dataDir || '';
+    // 对端实例快照（/api/status.peer）：SSE peer-status 事件会实时覆盖它
+    state.peer = s.peer || null;
+    paintPeerStatus(state.peer);
     $('#pause-btn').textContent = state.paused ? '恢复' : '暂停';
     renderBanner();
     updateReadinessDots(s);

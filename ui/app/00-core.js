@@ -761,6 +761,7 @@ function switchTab(name) {
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'skills') loadModulePage('skill');
   if (name === 'plugins') loadModulePage('plugin');
+  if (name === 'panels') loadPanelsView();
   if (name === 'snowluma') loadSnowlumaPage();
   if (name === 'settings') loadSettings();
 }
