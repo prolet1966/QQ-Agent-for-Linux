@@ -280,7 +280,11 @@ const state = {
   consolidateResult: {}, // chatKey -> { note, at, failed? }
   // 提示词预览缓存（GET /api/prompt-preview）：按当前启停状态组装的系统提示 + 可用工具。
   // 设置-工具页与技能页右侧共用；开关变动后 refreshPromptPreview() 拉新并原地替换 DOM。
-  promptPreview: null
+  promptPreview: null,
+  // 多实例统一控制台：当前正在调控的实例。
+  // self=true 表示本实例（直连）；self=false 且 id 非空表示走 /api/proxy/<id> 代理到对端。
+  // 由 ui/app/11-init.js 的账号切换器维护。
+  activeInst: { self: true, id: '', alias: '' }
 };
 
 // ── 工具函数 ──
@@ -541,9 +545,15 @@ async function api(path, options = {}) {
   // timeoutMs：请求级超时（AbortSignal.timeout）。用量页统计接口在历史数据多、
   // 后端忙时可能长时间无响应 —— 没有超时兜底的话加载态会永远转下去，
   // 到点抛错让页面能显示失败原因 + 重试按钮（R49）。
-  const { keepalive, timeoutMs, ...rest } = options;
+  const { keepalive, timeoutMs, local, ...rest } = options;
+  // 多实例：切到对端时，把 /api/* 透明改写成 /api/proxy/<id>/api/*，由后端代转；
+  // local:true 用于"必须打本机"的调用（如实例列表本身），不参与改写。
+  const reqPath = (!local && typeof path === 'string' && path.startsWith('/api/')
+    && state.activeInst && !state.activeInst.self && state.activeInst.id)
+    ? `/api/proxy/${encodeURIComponent(state.activeInst.id)}${path}`
+    : path;
   try {
-    const res = await fetch(path, {
+    const res = await fetch(reqPath, {
       headers: {
         'content-type': 'application/json',
         'x-console-token': CONSOLE_MARKER,

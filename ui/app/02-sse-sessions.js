@@ -7,6 +7,7 @@ function connectSSE() {
   if (state.preview) return;
   const es = new EventSource('/api/events');
   es.addEventListener('session-start', () => {
+    if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
     loadSessions();
     refreshStatus();
     // 自动跟随新会话（等待中/运行中）
@@ -18,6 +19,7 @@ function connectSSE() {
     }
   });
   es.addEventListener('session-update', (ev) => {
+    if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
     let data;
     try { data = JSON.parse(ev.data); } catch { return; }
     const id = data.sessionId;
@@ -55,6 +57,7 @@ function connectSSE() {
     scheduleSessionRender();
   });
   es.addEventListener('session-end', (ev) => {
+    if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
     let data = {};
     try { data = JSON.parse(ev.data); } catch { /* 数据坏了也照常刷列表 */ }
     loadSessions();

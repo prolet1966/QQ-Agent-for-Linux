@@ -47,6 +47,90 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeTabMenus(null);
 });
 
+// ── 多实例账号切换器（统一控制台）─────────────────────────────────
+// 一个控制台分别调控本机 / 对端实例。切到对端时，api() 会把 /api/* 透明改写成
+// /api/proxy/<id>/api/*（见 ui/app/00-core.js），后端代转到对端控制台。
+function isPeerView() {
+  return !!(state.activeInst && !state.activeInst.self && state.activeInst.id);
+}
+function paintInstSwitch() {
+  const box = $('#inst-switch');
+  if (!box) return;
+  const peer = isPeerView();
+  box.classList.toggle('peer', peer);
+  const label = $('#inst-switch-label');
+  if (label) label.textContent = state.activeInst.alias || (peer ? `实例 #${state.activeInst.id}` : '本机');
+  const dot = $('#inst-dot');
+  if (dot) dot.title = peer ? '当前调控：对端实例' : '当前调控：本实例';
+}
+let instList = [];
+function renderInstMenu() {
+  const menu = $('#inst-menu');
+  if (!menu) return;
+  menu.innerHTML = (instList.length ? instList : [{ id: '', alias: '本机', self: true }]).map((it) => {
+    const active = it.self ? !isPeerView() : (isPeerView() && String(it.id) === String(state.activeInst.id));
+    const meta = it.self ? '本机' : (`#${it.id} · ${it.online ? '在线' : '离线'}`);
+    return `<button class="inst-item${active ? ' active' : ''}" data-inst="${esc(String(it.id))}" data-self="${it.self ? '1' : '0'}">
+      <span class="inst-dot"></span>
+      <span>${esc(it.alias || ('实例 #' + it.id))}</span>
+      <span class="inst-meta">${it.self ? '' : esc(meta)}</span>
+    </button>`;
+  }).join('');
+  menu.querySelectorAll('.inst-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const it = instList.find((x) => String(x.id) === btn.dataset.inst && (x.self ? '1' : '0') === btn.dataset.self);
+      closeInstMenu();
+      if (it) setActiveInstance(it);
+    });
+  });
+}
+function closeInstMenu() {
+  const m = $('#inst-menu');
+  if (m) m.hidden = true;
+  $('#inst-switch-btn')?.setAttribute('aria-expanded', 'false');
+}
+async function loadInstances() {
+  try {
+    const d = await api('/api/instances', { local: true });
+    instList = Array.isArray(d.instances) ? d.instances : [];
+    renderInstMenu();
+    paintInstSwitch();
+  } catch { /* 接口不可用就保持现状 */ }
+}
+function setActiveInstance(it) {
+  // 切换前先把当前实例上防抖窗口内未落盘的设置写掉 —— 否则那次保存会打到对端去。
+  try { if (state.tab === 'settings' && typeof flushSettingsSaves === 'function') flushSettingsSaves(); } catch { /* 忽略 */ }
+  state.activeInst = {
+    self: !!it.self,
+    id: String(it.id || ''),
+    alias: it.alias || ''
+  };
+  // 清掉上个实例的缓存视图，避免切换瞬间闪现旧数据
+  state.sessions = [];
+  state.sessionDetail = null;
+  state.currentSessionId = null;
+  state.config = null;
+  paintInstSwitch();
+  renderInstMenu();
+  switchTab(state.tab);     // 重跑当前页签的加载（读的都走代理）
+  refreshStatus();
+}
+$('#inst-switch-btn')?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const m = $('#inst-menu');
+  if (!m) return;
+  const open = m.hidden;
+  m.hidden = !open;
+  $('#inst-switch-btn').setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', (event) => {
+  if (!event.target?.closest?.('#inst-switch')) closeInstMenu();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeInstMenu();
+});
+paintInstSwitch();
+
 // ── 启动 ──
 (async function init() {
   // 主题：先按本地偏好应用（index.html 的内联脚本已做过一次，这里同步按钮图标），
@@ -62,6 +146,9 @@ document.addEventListener('keydown', (event) => {
   // 启动 loading：先等 HTTP 服务可用（页面可能先于服务打开）
   setLoadingStatus('正在启动 QQ Agent 服务…');
   await bootLoop();
+  // 多实例：拉实例列表初始化账号切换器，并定期刷新对端在线状态
+  loadInstances();
+  setInterval(loadInstances, 30000);
   runUpdateCheck();                                 // 启动时静默查一次（失败不打扰）
   setInterval(() => runUpdateCheck(), 3600_000);    // 之后每小时查一次
 

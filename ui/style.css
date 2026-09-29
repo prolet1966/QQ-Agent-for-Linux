@@ -4951,3 +4951,36 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
 .fp-tip { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--muted); }
 .fp-tip--on { color: var(--green); }
 .fp-tip--warn { color: #e6b800; }
+
+/* ── 多实例账号切换器（统一控制台，2026-09-29）───────────────────────
+   一个控制台分别调控本机 / 对端实例。样式尽量只用既有 CSS 变量并带兜底，
+   避免变量缺失时整块不可见。 */
+.inst-switch { position: relative; display: inline-flex; align-items: center; margin-left: 10px; vertical-align: middle; }
+.inst-switch-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border, rgba(255,255,255,.14));
+  background: var(--panel, rgba(255,255,255,.05)); color: inherit;
+  font-size: 12px; line-height: 1.5; font-family: inherit;
+}
+.inst-switch-btn:hover { filter: brightness(1.15); }
+.inst-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted, #8a8f98); flex: 0 0 auto; }
+.inst-switch.peer .inst-dot { background: #f0a020; box-shadow: 0 0 6px rgba(240,160,32,.8); }
+.inst-switch.peer .inst-switch-btn { border-color: #f0a020; color: #f0a020; }
+.inst-caret { font-size: 9px; opacity: .7; }
+.inst-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 80;
+  min-width: 190px; padding: 6px; border-radius: 10px;
+  background: var(--panel-solid, #1c1f24); border: 1px solid var(--border, rgba(255,255,255,.14));
+  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+.inst-menu[hidden] { display: none; }
+.inst-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 9px; border-radius: 8px; cursor: pointer;
+  background: transparent; border: none; color: inherit; text-align: left;
+  font-size: 12.5px; font-family: inherit;
+}
+.inst-item:hover { background: rgba(255,255,255,.08); }
+.inst-item.active { background: rgba(255,255,255,.12); font-weight: 600; }
+.inst-item .inst-meta { margin-left: auto; font-size: 11px; color: var(--muted, #8a8f98); }

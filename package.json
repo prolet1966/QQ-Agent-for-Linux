@@ -24,11 +24,12 @@
     "server": "node src/server.js",
     "test": "node test/platform-test.mjs",
     "test:platform": "node test/platform-test.mjs",
-    "dist:linux": "electron-builder --linux deb rpm AppImage --x64",
-    "dist:deb": "electron-builder --linux deb --x64",
-    "dist:rpm": "electron-builder --linux rpm --x64",
-    "dist:appimage": "electron-builder --linux AppImage --x64",
-    "dist:win": "electron-builder --win nsis --x64"
+    "patch:epipe": "node scripts/patch-snowluma-epipe.mjs",
+    "dist:linux": "npm run patch:epipe && electron-builder --linux deb rpm AppImage --x64",
+    "dist:deb": "npm run patch:epipe && electron-builder --linux deb --x64",
+    "dist:rpm": "npm run patch:epipe && electron-builder --linux rpm --x64",
+    "dist:appimage": "npm run patch:epipe && electron-builder --linux AppImage --x64",
+    "dist:win": "npm run patch:epipe && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "js-yaml": "^5.4.1",

@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getConfig, updateConfig, deepMerge as deepMergeConfig, DATA_DIR } from './config.js';
+import { resolvePeerTarget } from './peer.js';
+import { PROFILE_ID } from './profile.js';
 import { customSearch } from './web-search.js';
 // 平台抽象层：打开目录/URL 的实际命令（Windows explorer/cmd，Linux xdg-open）
 import * as platform from './platform.js';
@@ -1336,6 +1338,85 @@ export function createRoutes(deps) {
       }
     },
 
+
+    // ── 多实例：统一控制台（服务端代理）─────────────────────────────
+    // 设计：两个实例仍是两个进程（一个进程=一个 QQ 账号），但只开一个统一控制台。
+    // 顶栏可切换「当前调控的实例」；切到对端时，前端把所有 /api/* 透明地改成
+    // /api/proxy/<对端实例号>/api/*，由本实例服务端代转（浏览器受同源 CSP +
+    // originAllowed 限制，无法直接跨端口访问对端控制台）。
+    {
+      method: 'GET', pattern: '/api/instances',
+      handler: async ({ res, json }) => {
+        const cfg = getConfig();
+        const selfId = String(PROFILE_ID || '1');
+        const selfAlias = String(cfg.server?.alias || '').trim() || `实例 #${selfId}`;
+        const list = [{
+          id: selfId, alias: selfAlias, self: true,
+          port: Number(cfg.server?.port) || null,
+          online: true
+        }];
+        const t = resolvePeerTarget(cfg);
+        if (t && t.valid) {
+          const snap = typeof peerSnapshot === 'function' ? peerSnapshot() : null;
+          list.push({
+            id: String(t.profile), alias: t.name, self: false,
+            port: Number(t.port) || null, url: t.httpUrl,
+            online: !!(snap && snap.ok),
+            status: (snap && snap.ok) ? snap.status : null,
+            error: (snap && !snap.ok) ? String(snap.error || '') : ''
+          });
+        }
+        return json(res, 200, { ok: true, selfId, instances: list });
+      }
+    },
+    {
+      // /api/proxy/<实例号>/api/... → 转发到对端控制台的同名路径。
+      // 安全：只转发给 resolvePeerTarget() 认可的本机回环对端，且只放行 /api/ 路径，
+      // 禁止代理代理（防止拿本实例当跳板无限套娃）。对端响应原样回传（含状态码/类型）。
+      method: '*', pattern: /^\/api\/proxy\/([^/]+)\/(api\/[^?#]*)$/,
+      handler: async ({ req, res, url, match, json }) => {
+        const id = decodeURIComponent(match[1]);
+        const rest = match[2];
+        const cfg = getConfig();
+        const t = resolvePeerTarget(cfg);
+        if (!t || t.valid === false) {
+          return json(res, 502, { error: `对端未配置或配置非法：${t?.error || 'server.peer 未启用'}` });
+        }
+        if (String(t.profile) !== id) return json(res, 404, { error: `未知实例：${id}` });
+        if (rest.startsWith('api/proxy/')) return json(res, 400, { error: '不支持代理代理' });
+
+        const targetUrl = `${t.httpUrl.replace(/\/+$/, '')}/${rest}${url.search || ''}`;
+        const headers = {};
+        if (t.token) headers['x-console-token'] = t.token;
+        const ct = req.headers['content-type'];
+        if (ct) headers['content-type'] = ct;
+
+        let body;
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          if (chunks.length) body = Buffer.concat(chunks);
+        }
+
+        let upstream;
+        try {
+          upstream = await fetch(targetUrl, {
+            method: req.method, headers, body,
+            signal: AbortSignal.timeout(t.timeoutMs || 8000),
+            redirect: 'manual'
+          });
+        } catch (e) {
+          return json(res, 502, { error: `对端请求失败：${String(e?.message ?? e)}` });
+        }
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, {
+          'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
+          'cache-control': 'no-store'
+        });
+        res.end(buf);
+        return undefined;
+      }
+    },
 
     {
       method: 'POST', pattern: '/api/config',

@@ -1095,8 +1095,10 @@ function renderOnebotSection(c) {
 
     <div class="settings-divider"></div>
     <h3 id="settings-peer">对端实例（server.peer）</h3>
-    <div class="hint" style="margin-bottom:10px">把同机另一个多开实例设为对端后，这里只读展示它的在线状态（不转发消息）。
-      端口规则与 QQ_AGENT_PROFILE 一致：#N 的 HTTP 控制台 = 3210 + 100N。详细见 docs/multi-instance.md。</div>
+    <div class="hint" style="margin-bottom:10px">把同机另一个多开实例设为对端后，可用顶栏的「实例切换器」切到它并进行完整调控
+      （全部 /api 请求由本实例服务端代转，见 src/routes.js 的 /api/proxy）。
+      「对端 HTTP 地址」请填对端的<strong>控制台</b>地址</strong>（如本机当前：#1=<code>http://127.0.0.1:3410</code>、#2=<code>http://127.0.0.1:3510</code>），
+      不是 OneBot 的 3000/3001。详细见 docs/multi-instance.md。</div>
     <div class="checkbox-row"><input type="checkbox" class="sw" id="cfg-peer-enabled" ${c.server?.peer?.enabled ? 'checked' : ''} />
       <label for="cfg-peer-enabled">启用对端实例状态监测（默认每 15 秒探测一次）</label></div>
     <div class="field-row">

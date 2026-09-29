@@ -308,6 +308,22 @@ process.on('uncaughtException', (error) => {
   app.exit(1);
 });
 
+// 2026-09-29 诊断 + 加固：记录收到的终止信号，并忽略 SIGHUP。
+// 现象：两个实例会在某一刻「同时」以 exitCode=1 消失（16:15:07、16:29:11），
+// 日志里既没有 [未捕获异常]、也没有 before-quit，而 journal 侧往往伴随终端关闭
+// （gnome-terminal-server / vte-spawn-*.scope 停止）。后台实例不该因为终端消失
+// 而退出 —— 这里显式忽略 SIGHUP；SIGTERM/SIGINT 记一笔后走正常退出流程，
+// 下次就能直接从日志区分「被信号杀」还是「自己崩」。
+for (const sig of ['SIGHUP', 'SIGTERM', 'SIGINT']) {
+  try {
+    process.on(sig, () => {
+      logCritical('signal', `收到信号 ${sig}（pid=${process.pid}）`);
+      if (sig === 'SIGHUP') return;        // 忽略：终端/控制组清理不该带走后台实例
+      try { app.quit(); } catch { app.exit(0); }
+    });
+  } catch { /* 注册失败不影响启动 */ }
+}
+
 // AppUserModelID：让 Windows 把窗口归到「QQ Agent」身份下（任务栏分组/图标/通知），
 // 否则 dev 模式下会被当成裸 electron.exe，钉任务栏变成 electron 图标
 app.setAppUserModelId('cn.kondius.qq-agent');
@@ -370,6 +386,11 @@ process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
 if (profileSuffix()) {
   app.setPath('userData', path.join(app.getPath('appData'), `qq-agent${profileSuffix()}`));
 }
+
+// 多实例统一控制台（2026-09-29）：副实例（#2 起）默认不弹窗口、隐藏到托盘 ——
+// 桌面上只留主实例一个窗口，切号用界面顶部的账号切换器（见 ui/app/11-init.js）。
+// 需要单独看副实例时，从它的托盘图标「显示主界面」。强制显示：QQ_AGENT_SHOW_WINDOW=1。
+const START_HIDDEN = !!profileSuffix() && String(process.env.QQ_AGENT_SHOW_WINDOW ?? '') !== '1';
 
 // 单实例锁：重复启动（双击 .bat）不产生第二个实例，而是唤出已有窗口。
 // 没有锁的话第二个实例会双份连 SnowLuma，群消息会被双重回复。
@@ -878,14 +899,14 @@ function createWindow(port) {
   Menu.setApplicationMenu(null);
   // 窗口打开先显示 loading 壳，等页面真正加载完成再亮相，避免白屏和用户反复双击
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    if (!START_HIDDEN) mainWindow?.show();
     // 任务栏图标兜底（2026-09-20）：部分 Windows 上无边框透明窗口的任务栏图标
     // 不吃 BrowserWindow 的 icon 选项（表现为空白页图标）。show 之后显式
     // setIcon 一次，两条路都喂到。
     try { mainWindow?.setIcon(ICON_PATH); } catch { /* 图标缺失时忽略 */ }
   });
   mainWindow.webContents.on('did-finish-load', () => {
-    if (mainWindow) {
+    if (mainWindow && !START_HIDDEN) {
       mainWindow.show();
       mainWindow.focus();
     }

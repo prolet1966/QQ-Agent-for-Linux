@@ -33,7 +33,18 @@
        transparent 时 body 的背景会被传播到画布、铺满整个窗口矩形。 -->
   <div class="app-shell">
   <header id="topbar">
-    <div class="brand">QQ Agent <span class="brand-sub"></span></div>
+    <div class="brand">QQ Agent <span class="brand-sub"></span>
+      <!-- 多实例账号切换器：一个控制台分别调控本机 / 对端实例（逻辑见 ui/app/11-init.js）。
+           放在 .brand 单元格内，避免动 #topbar 的三列网格（1fr auto 1fr）。 -->
+      <div class="inst-switch" id="inst-switch">
+        <button class="inst-switch-btn" id="inst-switch-btn" type="button" aria-haspopup="true" aria-expanded="false" title="切换要调控的实例">
+          <span class="inst-dot" id="inst-dot"></span>
+          <span class="inst-label" id="inst-switch-label">本机</span>
+          <span class="inst-caret">▾</span>
+        </button>
+        <div class="inst-menu" id="inst-menu" hidden></div>
+      </div>
+    </div>
     <nav id="tabs">
       <!-- 顶级导航按「数据 / 统计 / 扩展 / 系统」分组。
            原 8 个页签仍保留 .tab + data-tab（点击绑定与 active 切换不受影响），
