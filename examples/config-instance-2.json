@@ -1,0 +1,50 @@
+{
+  "_说明": [
+    "QQ Agent Linux 版：第二实例（QQ_AGENT_PROFILE=2）的配置参考模板。",
+    "",
+    "用途：实例 #2 首次启动会用出厂默认配置，直接可用。只有当你想覆盖默认值时才需要",
+    "改 ~/.local/share/qq-agent-2/config.json。本文件只列出『多开场景下值得改/需要改』的项。",
+    "",
+    "⚠️ 这不是可以直接粘贴的补丁文件，里面是占位符，请按实际部署填写。",
+    "⚠️ 不要整份覆盖 config.json（它含 API 地址、模型选择、大量开关）；逐项按需改。",
+    "⚠️ 不要把实例 #1 的 config.json 拷过来 —— API Key / 白名单 / 人设是按实例独立的。",
+    "⚠️ 本文件不含真实密钥。你自己的 config.json 含 API Key 与登录凭据，不要提交进仓库。"
+  ],
+
+  "_端口推算公式": [
+    "实例 #N（QQ_AGENT_PROFILE=N）：",
+    "  数据目录 = ~/.local/share/qq-agent-N",
+    "  控制台 server.port = 3210 + 100N（可用环境变量 QQ_AGENT_PORT 覆盖）",
+    "  snowluma.wsUrl  = ws://127.0.0.1:3001 + 100N",
+    "  snowluma.httpUrl = http://127.0.0.1:3000 + 100N",
+    "N=2 时：目录 qq-agent-2、控制台 3410、ws 3201、http 3200。",
+    "若主实例手改过端口，选 N 或显式 QQ_AGENT_PORT，避免与主实例冲突。"
+  ],
+
+  "snowluma": {
+    "dir": "<第二份 SnowLuma 的绝对路径，例如 /home/<you>/snowluma-2>",
+    "_说明_dir": "必须指向独立副本。否则两个实例共用一份 SnowLuma（一个 QQ 号），且第二个实例会因 WebUI 端口探测误判『已在运行』而不启动自己的协议端。",
+    "autoLaunch": true,
+    "_说明_autoLaunch": "true = 应用启动时自动拉起 SnowLuma #2。端口冲突排查完再开。",
+    "wsUrl": "ws://127.0.0.1:3201",
+    "httpUrl": "http://127.0.0.1:3200",
+    "_说明_ws_http": "与实例 #2 默认一致，一般不用改；留空也会由 QQ_AGENT_PROFILE 推导。SnowLuma #2 的 OneBot 端口要在它的 WebUI 里配成同样的值。"
+  },
+
+  "server": {
+    "port": 3410,
+    "_说明_port": "实例 #2 默认 3210+200=3410。主实例占用或想换端口时改这里，或启动时用 QQ_AGENT_PORT 覆盖。",
+    "autoStart": false,
+    "closeToTray": true
+  },
+
+  "extensions": {
+    "hotReload": true,
+    "_说明_hotReload": "保持与主实例一致即可；共享机器上建议关掉（等于任意落盘的 JS 会被执行）。"
+  },
+
+  "_单实例锁说明": [
+    "实例 #2 的数据目录自己有一套 qq-agent.lock，两个实例不会互相排斥。",
+    "只有『同一目录被启动两次』才会被锁拒绝（安全网，防双份连 Same 协议端）。"
+  ]
+}
