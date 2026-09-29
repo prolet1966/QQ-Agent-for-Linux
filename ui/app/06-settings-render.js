@@ -1188,11 +1188,11 @@ function renderSkillSettingsModal(skill) {
   const skillId = skill.id;
   const schema = skill.configSchema || {};
   const values = skill.settings || {};
-  // internal 字段（列表/对象类）不渲染成表单输入 —— 它们由专用界面管理。
-  // 但仍然要在弹窗里列出来并说明去哪改，否则用户会以为"这个设置根本不存在"。
+  // 全部按 schema 键序渲染；internal（列表/对象类）也渲染成**可编辑的 JSON 编辑器**
+  // （旧版只贴说明不让改 —— 用户想调 targets/白名单这类列表就无从下手，
+  //  即"图形化调整不完善"的主要痛处）。保存时前端先 JSON.parse 校验，
+  //  解析失败直接拒绝保存并指出是哪个字段。
   const allKeys = Object.keys(schema);
-  const internalKeys = allKeys.filter((k) => schema[k]?.type === 'internal');
-  const keys = allKeys.filter((k) => schema[k]?.type !== 'internal');
   if (!allKeys.length) return { error: '这个技能没有可配置项' };
 
   const fieldHtml = (key) => {
@@ -1203,8 +1203,10 @@ function renderSkillSettingsModal(skill) {
     const id = `skset-${esc(skillId)}-${esc(key)}`;
     // secret：用密码框 + 占位符提示"留空不改"，避免把脱敏值当明文回填
     const isSecret = d.secret === true;
-    // 长文本字段跨整行：窄列里换行会碎成一条，读起来很累
-    const isWide = d.type === 'string' && (d.multiline === true || String(d.description || '').length > 60);
+    const isList = d.type === 'internal' && Array.isArray(v);
+    const isObj = d.type === 'internal' && !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date);
+    // 长文本/JSON 字段跨整行：窄列里换行会碎成一条，读起来很累
+    const isWide = isList || isObj || d.type === 'string' && (d.multiline === true || String(d.description || '').length > 60);
     const cls = 'field' + (isWide ? ' field--wide' : '');
     let input;
     if (d.type === 'boolean') {
@@ -1213,8 +1215,19 @@ function renderSkillSettingsModal(skill) {
         <input type="checkbox" class="sw" id="${id}" data-key="${esc(key)}" data-type="boolean" ${v ? 'checked' : ''} />
         <span class="st-text">${v ? '已开启' : '已关闭'}</span>
       </label>`;
+    } else if (isList || isObj) {
+      // internal 列表/对象 → JSON 编辑器（等宽大 textarea + 校验提示）
+      const pretty = JSON.stringify(v, null, 2);
+      input = `<textarea class="sks-json" id="${id}" data-key="${esc(key)}" data-type="json" rows="${Math.min(14, Math.max(6, pretty.split('\n').length + 1))}" spellcheck="false">${esc(pretty)}</textarea>`;
     } else if (d.type === 'number') {
-      input = `<input type="number" id="${id}" data-key="${esc(key)}" data-type="number" value="${esc(v)}" step="any" />`;
+      // 有 min/max 的数字 → 滑条 + 数值框联动（图形化调整），否则普通数字框
+      const hasRange = Number.isFinite(Number(d.min)) && Number.isFinite(Number(d.max));
+      const lo = d.min ?? -1e9, hi = d.max ?? 1e9, step = d.step ?? 1;
+      input = `<div class="sks-num">
+        <input type="number" id="${id}" data-key="${esc(key)}" data-type="number" value="${esc(v)}" min="${esc(lo)}" max="${esc(hi)}" step="${esc(step)}" />
+        ${hasRange ? `<input type="range" id="${id}-range" min="${esc(lo)}" max="${esc(hi)}" step="${esc(step)}" value="${esc(v)}" data-sync="${esc(id)}" />` : ''}
+        <span class="sks-num-val" id="${id}-val">${esc(v)}</span>
+      </div>`;
     } else if (d.type === 'enum' && Array.isArray(d.values)) {
       // 枚举渲染成下拉：值写错会让技能行为异常，下拉从根上避免手抖
       input = `<select id="${id}" data-key="${esc(key)}" data-type="enum">${
@@ -1225,6 +1238,15 @@ function renderSkillSettingsModal(skill) {
     }
     return `<div class="${cls}"><label>${label}${d.secret ? ' 🔒' : ''}</label>${input}${hint}</div>`;
   };
+
+  // schema 里的 group 字段 → 渲染成小节标题（按键序保留先后）
+  const keyGroups = [];
+  let lastGroup = null;
+  for (const k of allKeys) {
+    const g = schema[k]?.group || '';
+    if (g !== lastGroup) { keyGroups.push({ head: g ? `<div class="sks-group">${esc(g)}</div>` : '', group: g }); lastGroup = g; }
+    keyGroups.push({ head: fieldHtml(k) });
+  }
 
   return { html: `<div class="modal skill-modal" role="dialog" aria-modal="true" aria-label="${esc(skill.name)} 设置">
     <div class="skill-modal__head">
@@ -1240,18 +1262,14 @@ function renderSkillSettingsModal(skill) {
     </div>
     <div class="skill-modal__body">
       <div class="skill-modal__note">
-        共 <b>${keys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个技能会读到它们。
+        共 <b>${allKeys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个技能会读到它们。改动即时生效，无需重启。
       </div>
-      <div class="skill-form">${keys.map(fieldHtml).join('')}</div>
-      ${internalKeys.length ? `<div class="skill-modal__internal">
-        <div class="skill-modal__internal-head">以下设置不在这里改</div>
-        ${internalKeys.map((k) => `<div class="skill-modal__internal-item"><b>${esc(schema[k].label || k)}</b><br />${esc(schema[k].description || '')}</div>`).join('')}
-      </div>` : ''}
+      <div class="skill-form">${keyGroups.map((x) => x.head).join('')}</div>
     </div>
     <div class="skill-modal__foot">
       <!-- 上传到市场：从卡片上收进来（卡片只留开关 + 设置，低频动作不常驻） -->
       <button class="btn btn-small" id="skset-upload" title="把这个条目发布到社区市场">上传到市场</button>
-      <span class="skill-modal__foot-tip">改动即时生效，无需重启</span>
+      <span class="skill-modal__foot-tip">JSON 列表保存时会先校验，写错会指出字段</span>
       <span class="spacer"></span>
       <button class="btn btn-small" id="skset-cancel">取消</button>
       <button class="btn btn-primary" id="skset-save">保存</button>
@@ -1292,19 +1310,58 @@ function openSkillSettings(skillId) {
     });
   });
 
+  // 数值滑条 ↔ 数值框双向联动（2026-09-29：图形化调整 —— 拖滑条实时改数值框，
+  // 手输数值也让滑条跟上；范围与步长由 schema min/max/step 决定）
+  overlay.querySelectorAll('.sks-num').forEach((box) => {
+    const num = box.querySelector('input[type="number"]');
+    const range = box.querySelector('input[type="range"]');
+    const val = box.querySelector('.sks-num-val');
+    if (!num || !range || !val) return;
+    const syncVal = () => { val.textContent = num.value; };
+    num.addEventListener('input', () => {
+      range.value = num.value;
+      syncVal();
+    });
+    range.addEventListener('input', () => {
+      num.value = range.value;
+      syncVal();
+    });
+  });
+
   overlay.querySelector('#skset-save').addEventListener('click', async () => {
     const settings = {};
-    overlay.querySelectorAll('[data-key]').forEach((el) => {
-      const key = el.dataset.key;
-      const type = el.dataset.type;
-      if (type === 'boolean') settings[key] = el.checked;
-      else if (type === 'number') {
-        const n = Number(el.value);
-        // 空值/非数字：不提交这个键，让后端保留原值（而不是写进一个 NaN）
-        if (el.value.trim() !== '' && Number.isFinite(n)) settings[key] = n;
-      } else if (type === 'enum') settings[key] = el.value;
-      else settings[key] = el.value;   // secret 留空 → 后端按"不修改"处理
-    });
+    const schema = skill.configSchema || {};   // 保存侧用 skill 自带的 schema（render 侧那份不可见）
+    let corrupt = '';
+    try {
+      overlay.querySelectorAll('[data-key]').forEach((el) => {
+        const key = el.dataset.key;
+        const type = el.dataset.type;
+        const label = schema[key]?.label || key;
+        if (type === 'boolean') settings[key] = el.checked;
+        else if (type === 'json') {
+          // JSON 编辑器：解析失败立刻拒绝保存并指出是哪个字段
+          try {
+            settings[key] = JSON.parse(el.value);
+          } catch (e) {
+            corrupt = `「${label}」的 JSON 格式有误：${String(e?.message || e).slice(0, 90)}`;
+            throw new Error(corrupt);
+          }
+        } else if (type === 'number') {
+          const n = Number(el.value);
+          // 空值/非数字：不提交这个键，让后端保留原值（而不是写进一个 NaN）
+          if (el.value.trim() !== '' && Number.isFinite(n)) {
+            const d = schema[key] || {};
+            const lo = Number.isFinite(Number(d.min)) ? Number(d.min) : -Infinity;
+            const hi = Number.isFinite(Number(d.max)) ? Number(d.max) : Infinity;
+            settings[key] = n < lo ? lo : n > hi ? hi : n;
+          }
+        } else if (type === 'enum') settings[key] = el.value;
+        else settings[key] = el.value;   // secret 留空 → 后端按"不修改"处理
+      });
+    } catch (e) {
+      alert(`保存被拦截：${corrupt || e.message}`);
+      return;
+    }
     try {
       const r = await api(`/api/skills/${encodeURIComponent(skillId)}`, {
         method: 'POST',

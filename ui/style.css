@@ -2858,6 +2858,36 @@ tr.chat-del-selected td { background: color-mix(in srgb, var(--red) 10%, transpa
 .skill-toggle-row .st-text { font-size: 12.5px; color: var(--muted); }
 .skill-toggle-row input:checked + .st-text { color: var(--green); font-weight: 600; }
 
+/* 2026-09-29：插件/技能设置图形化升级
+   · internal 列表/对象 → JSON 编辑器（等宽、大写校验提示）
+   · 有 min/max 的数字 → 滑条 + 数值框联动
+   · schema.group → 小节标题 */
+.sks-json {
+  font-family: var(--mono, ui-monospace, 'SF Mono', Consolas, monospace);
+  font-size: 12px; line-height: 1.6;
+  min-height: 96px; resize: vertical;
+  background: var(--layer-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+}
+.sks-num { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sks-num input[type="number"] {
+  width: 92px !important; flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.sks-num input[type="range"] { flex: 1 1 140px; min-width: 120px; accent-color: var(--accent, #4a9eff); }
+.sks-num-val {
+  flex: 0 0 auto; min-width: 42px; text-align: right;
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.sks-group {
+  grid-column: 1 / -1;
+  margin: 14px 0 2px; padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px; font-weight: 700; letter-spacing: .04em;
+  color: var(--muted);
+}
+.sks-group:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+
 /* ══════════════════════════════════════════════════════════════
  开关（switch）—— 设置页里所有"打勾才启用"的选项统一画成左右滑动开关
  ══════════════════════════════════════════════════════════════
