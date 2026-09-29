@@ -1264,9 +1264,21 @@ function freePoolHtml(data) {
   }).join('');
   const order = (pool.order || []).map((id) => esc(sources.find((s) => s.id === id)?.name || id)).join(' → ');
   const noKey = candidates.filter((c) => c.tier === 'free-quota').length;
+  // 展示「程序自己找到的接口」：baseURL（image-get 源则是完整 URL）与 key 来源。
+  // 让用户直接看到"自动找 baseURL / key"这件事确实发生了，而不是只有一个模型名。
+  const candOf = (id) => candidates.find((x) => x.id === id) || {};
+  const endpointOf = (s) => {
+    const c = candOf(s.id);
+    return s.kind === 'image-get' ? (c.url || s.url || '') : (c.baseUrl || s.baseUrl || '');
+  };
+  const keySrcOf = (s) => (s.needsKey ? (s.keyFrom ? `你的 key（${s.keyFrom}）` : '需要你的 key') : '免 key');
+  const curSource = sources.find((s) => s.id === pool.current);
+  const curLine = curSource
+    ? `<div class="fp-cur-line">当前接口：<b>${esc(curSource.provider || '')}</b> · <code class="fp-url">${esc(endpointOf(curSource) || '(内置地址)')}</code> · <code class="fp-model">${esc(curSource.model || '')}</code> · <span class="fp-key">${esc(keySrcOf(curSource))}</span></div>`
+    : '';
   return `<div class="sks-freepool" id="skset-fp">
     <div class="sks-catalog__head">
-      <div class="sks-catalog__title">🆓 免费模型自动探测<span class="sks-catalog__hint">真出一张小图验证 · 可用的按顺序轮换用</span></div>
+      <div class="sks-catalog__title">🆓 免费模型自动探测<span class="sks-catalog__hint">自动找接口、自动选可用源、真出一张小图验证 · 可用的按顺序轮换用</span></div>
       <span class="spacer"></span>
       <button class="btn btn-small" id="skset-fp-refresh" title="立刻重新探测一遍所有免费源（会真的各出一张小图）">立即探测</button>
       <button class="btn btn-small" id="skset-fp-clear" title="清空免费池：清空后下次出图会重新探测">清空</button>
@@ -1275,6 +1287,7 @@ function freePoolHtml(data) {
       <b>${okCount}</b> / ${total} 个可用${order ? ` · 轮换顺序：${order}` : ''}
       <span class="fp-sum__time">（探测于 ${esc(updated)}）</span>
     </div>
+    ${curLine}
     ${pool.hint ? `<div class="fp-hint">${esc(pool.hint)}</div>` : ''}
     <div class="fp-list">${rows || '<div class="sks-cat-loading">还没有探测结果，点「立即探测」试一次。</div>'}</div>
     ${noKey ? `<div class="fp-tip">还有 ${noKey} 个平台是"免费额度、需你自己的 key"（硅基流动 / 智谱 / 百炼 / 混元 / 魔搭）。
