@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ============================================================================
 #  lib.sh — QQ-Agent Linux 打包共享库
 #  定义版本、架构、路径、公共函数，被 scripts/0X-*.sh 与 test/*.sh 复用
@@ -27,7 +27,7 @@ PKG_NAME="qq-agent"
 # 它与 package.json 的 version（【应用版本】，即上游 Windows 版 V0.4.4）是两回事：
 # 本移植版只重新打包、不改应用代码，故 package.json 保持 0.4.4 不动。
 # 0.4.5 = 仅修复 deb/rpm 启动器的 Chromium 沙箱判据（见 scripts/03-stage.sh）。
-APP_VERSION="0.4.6"
+APP_VERSION="0.4.7"
 PKG_RELEASE="1"
 ELECTRON_VERSION="33.4.11"
 SNOWLUMA_VERSION="1.14.19"
@@ -547,7 +547,7 @@ QL_GH_MIRROR="${QL_GH_MIRROR-https://gh-proxy.com/}"
 APPIMAGETOOL_SHA256_x86_64="a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0"
 APPIMAGETOOL_SHA256_aarch64="1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe"
 TYPE2RUNTIME_SHA256_x86_64="1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
-TYPE2RUNTIME_SHA256_aarch64="7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372"
+TYPE2RUNTIME_SHA256_aarch64="b4ff0030242d0c3bb12ce40541828303cf167493f4793456f0436edd6255c39d"
 
 appimagetool_name() { echo "appimagetool-${APPIMAGE_ARCH}.AppImage"; }
 runtime_name()      { echo "runtime-${APPIMAGE_ARCH}"; }
