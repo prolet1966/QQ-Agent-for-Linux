@@ -89,6 +89,17 @@ export function setup(api) {
   apiFetch = api.fetch;
   log(`文生图技能已加载（${BUILD_TAG}）`);
 
+  // 启动预热（2026-09-29）：开着「只用免费模型 + 自动探测」且**从未探测过**时，
+  // 后台先探一次，把免费池填好，免得用户第一次出图还要现等探测。
+  // 失败静默（ensurePool / discoverFree 内部已兜底），fire-and-forget。
+  try {
+    const warm = readSettings();
+    if (warm.freeOnly && warm.autoFree) {
+      const cur = freeModels.loadPool();
+      if (!cur.updatedAt) void ensurePool(warm).catch(() => {});
+    }
+  } catch { /* 预热失败不影响加载 */ }
+
   api.registerTool({
     id: 'draw',                      // 注册后实际是 image-generate__draw
     name: '生成图片',
@@ -249,20 +260,46 @@ export const providers = {
 };
 
 /**
+ * 有"有希望"的免费候选源：免 key 源（keyless）恒算；需要 key 的免费额度源，
+ * 只有用户在 freeKeys / 环境变量里真的给了 key 才算（没 key 的探了也白探）。
+ */
+function hopefulFreeSources(settings) {
+  return freeModels.FREE_SOURCES.filter((s) => {
+    if (s.tier !== 'free-quota') return true;
+    return !!freeModels.resolveKey(s, settings).key;
+  });
+}
+
+/**
  * 依赖自检：缺配置就直说，别让界面显示「生效中」而调用时才发现画不了。
  * ⚠️ 必须是同步函数 —— 可用性判定走同步调用链，返回 Promise 会被当成「可用」。
  * 这里只读内存里的配置 + 磁盘上的池子（都是同步 IO），没有网络请求。
+ *
+ * ⚠️ 空池 ≠ 不可用（2026-09-29 修）：池子只是"上次探测的缓存"。若因为池子为空
+ *    就把技能判成不可用，工具根本不会提供给模型，用户感知就是"自动配置免费模型
+ *    没做" —— 而实际上首次出图时 resolveTargets() 会自动 ensurePool() 探测。
+ *    所以：开着 autoFree 且存在有希望的候选源时，空池也返回可用（reason 标注
+ *    "待探测/重试中"），把探测推迟到真正要用的时候。
  */
 export function available() {
   const settings = readSettings();
   if (settings.freeOnly) {
     const summary = freeModels.poolSummary();
-    if (!summary.available) {
-      return { ok: false, reason: `免费模型池现在没有可用源（不使用付费模型）。${summary.hint}` };
+    if (summary.available) {
+      const head = summary.sources.find((s) => s.id === summary.current);
+      const more = summary.available > 1 ? `，共 ${summary.available} 个自动轮换` : '（只有 1 个免费源，暂不轮换）';
+      return { ok: true, reason: `免费模型：${head?.name || summary.current}${more}` };
     }
-    const head = summary.sources.find((s) => s.id === summary.current);
-    const more = summary.available > 1 ? `，共 ${summary.available} 个自动轮换` : '（只有 1 个免费源，暂不轮换）';
-    return { ok: true, reason: `免费模型：${head?.name || summary.current}${more}` };
+    // 池子为空：别直接判不可用（见上方注释）。autoFree + 有候选源 → 仍可用，
+    // 首次出图会触发自动探测。
+    if (settings.autoFree) {
+      const hopeful = hopefulFreeSources(settings);
+      if (hopeful.length) {
+        const state = summary.updatedAt ? '上次探测无可用，稍后自动重试' : '待探测';
+        return { ok: true, reason: `免费模型：${state}（${hopeful.length} 个候选源，出图时自动探测）` };
+      }
+    }
+    return { ok: false, reason: `免费模型池现在没有可用源（不使用付费模型）。${summary.hint}` };
   }
   const missing = missingConfig(settings);
   if (missing.length) return { ok: false, reason: `还没配置：${missing.join(' / ')}（在设置页「文生图」里填）` };
