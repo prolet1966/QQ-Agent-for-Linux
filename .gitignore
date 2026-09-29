@@ -4,10 +4,26 @@ dist/
 snowluma/
 *.log
 
-# 本地杂项
+# ── 构建产物（arm64 构建脚本，可由脚本重建，绝不入库）──
+cache/
+stage/
+stage-*/
+out/
+.anchor-test/
+.anchor-test-win/
+
+# ── CI 输入：清洗过的应用代码 tar ──
+# 这是 `03-stage.sh --app-tarball` 的产出，已套用隐私排除清单。
+# ⚠️ 这一行**只是防止误加新文件**：`ci-input/app-code.tar.gz` 本身是刻意跟踪并提交的
+#    —— CI 需要它来组装应用树；已跟踪的文件不受 .gitignore 影响。
+ci-input/
+
+# ── 编辑器 / 系统 ──
 .DS_Store
+Thumbs.db
 *.swp
 *~
+
 # 本地运行时数据目录（测试实例产生，不入库）
 data/
 
