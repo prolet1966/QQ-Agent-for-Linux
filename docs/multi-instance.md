@@ -145,3 +145,34 @@ QQ_AGENT_PROFILE=2 QQ_AGENT_PORT=3510 qq-agent
 
 > 另：该 config 里还有 `server.alias` / `server.peer` 两个自定义字段，
 > 目前**没有任何代码消费它们**（详见 `docs/peer-relay-design.md`），不影响多开。
+
+---
+
+## 6. 本机落地实录（2026-09-29）
+
+> 记录这台机器上已按 §2/§5 完成的实例 #2 部署，供巡检与故障定位对照。
+
+| 项 | 实例 #1（主，Mio） | 实例 #2（Asaba） |
+|---|---|---|
+| 数据目录 | `~/.local/share/qq-agent` | `~/.local/share/qq-agent-2` |
+| 控制台端口 | 3410（config `server.port` 手改） | 3510（`QQ_AGENT_PORT=3510` 显式） |
+| SnowLuma 副本 | 内置 `/opt/QQ Agent/resources/app/snowluma` | `~/snowluma-2`（已清空原拷贝里的登录态与 logs） |
+| SnowLuma WebUI | 5099 | 5199（首次启动后改；现在还没启动） |
+| OneBot WS / HTTP | 3001 / 3000 | 3201 / 3200（在 snowluma-2 设置里配） |
+| `snowluma.autoLaunch` | true | **false**（等扫码登录后再开） |
+| 账号 | Mio（2215188985，已在线） | Asaba（待扫码登录） |
+| 配置来源 | 既有 config.json（未手工改） | 从主 config 复制后改：端口/别名/snowluma 指向/人设 Asaba；`plugins.proactiveChat.enable=false`（默认不主动发） |
+
+实例 #2 看护（与主实例同款 cron，基于数据目录锁文件判活，避免与主进程名混淆）：
+
+```cron
+* * * * * L="$HOME/.local/share/qq-agent-2/instance.lock"; P=$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$L" 2>/dev/null); ALIVE=$([ -n "$P" ] && kill -0 "$P" 2>/dev/null && echo 1); if [ "$ALIVE" != 1 ] && [ -f "$HOME/.local/share/qq-agent-2/config.json" ]; then echo "relaunch-2 $(date '+%F %T')" >> /home/kmy/.config/qq-agent/watchdog.log; DISPLAY=:0 nohup env QQ_AGENT_PROFILE=2 QQ_AGENT_PORT=3510 /opt/QQ\ Agent/qq-agent >/dev/null 2>&1 & fi
+```
+
+> ⚠️ 注意：主实例的进程名与 #2 相同（都是 `/opt/QQ Agent/qq-agent`），**不能**用
+> pgrep 按进程名区分死活；#2 看护改用数据目录锁。若要手拉 #2，注意 `DISPLAY=:0`
+> 与 `QQ_AGENT_PROFILE=2 QQ_AGENT_PORT=3510` 三个条件都要带上，否则会撞 3410 或进错目录。
+> 半自动启动样例见 `examples/multi-instance-launch.sh`（默认 #2 端口已是 3510）。
+>
+> 待办：Asaba 登录 = snowluma-2 WebUI（5199）扫码 → 配 OneBot 3201/3200 →
+> 开 `snowluma.autoLaunch`。共用的是同一台 mongod（27017），知识库按 tenant 隔离。

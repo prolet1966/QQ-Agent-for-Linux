@@ -288,7 +288,10 @@ export function createApp({ log = console.log } = {}) {
         '--bind_ip', '127.0.0.1',
         '--logpath', path.join(dbPath, 'mongod.log'),
         '--logappend',
-        '--setParameter', 'enableTestCommands=0'
+        // 关掉全时诊断采集（FTDC）：它每秒把 metrics.interim.temp 写到 dbpath，
+        // dbpath 一旦被 tmp 清理批次摸到就整进程 terminate() 自杀（8.0.5 实测）。
+        // 知识库链路不需要这些诊断数据；去掉它彻底消除这类崩溃。
+        '--setParameter', 'diagnosticDataCollectionEnabled=false'
       ], { detached: true, stdio: 'ignore' });
       proc.unref();
       // 等它真的开始监听（最多 ~12s；冷启动首次要建初始库）。不等成功也不报错：
