@@ -1,0 +1,10 @@
+# 运行/构建产物 —— 不提交
+node_modules/
+dist/
+snowluma/
+*.log
+
+# 本地杂项
+.DS_Store
+*.swp
+*~
