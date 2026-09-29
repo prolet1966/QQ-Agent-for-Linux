@@ -1,0 +1,119 @@
+{
+  "id": "proactiveChat",
+  "name": "主动找聊",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "message",
+  "description": "按目标（单个群 / 单个私聊）主动找人聊天：每个目标可独立设置启停、最小/最大间隔、每日上限、安静时段、话题与风格。技术上是确定性插件：自己定时、直接经宿主 sender 发送，不经过模型判断，条件满足就必发。",
+  "author": "QQ Agent",
+  "enabledByDefault": false,
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "enable": false,
+    "minGapMin": 60,
+    "maxGapMin": 180,
+    "dailyMax": 3,
+    "quietStart": 23,
+    "quietEnd": 8,
+    "respectRecentReply": false,
+    "recentReplySilenceMin": 30,
+    "probeProfile": true,
+    "probeQzone": true,
+    "syncMemory": true,
+    "autoConsolidate": true,
+    "targets": [],
+    "scheduledTasks": []
+  },
+  "configSchema": {
+    "enable": {
+      "type": "boolean",
+      "label": "总开关",
+      "description": "开后按下方 targets 定时主动找人聊；默认关，避免打扰。"
+    },
+    "minGapMin": {
+      "type": "number",
+      "label": "默认最小间隔 (分钟)",
+      "description": "单个目标未单独配置时生效。两次主动找聊之间至少隔这么久。",
+      "min": 10,
+      "max": 1440,
+      "step": 5
+    },
+    "maxGapMin": {
+      "type": "number",
+      "label": "默认最大间隔 (分钟)",
+      "description": "单个目标未单独配置时生效。到点后会随机落在 min~max 之间。",
+      "min": 10,
+      "max": 1440,
+      "step": 5
+    },
+    "dailyMax": {
+      "type": "number",
+      "label": "默认每日上限",
+      "description": "单个目标未单独配置时生效。每目标每天最多主动发起几次。",
+      "min": 1,
+      "max": 24,
+      "step": 1
+    },
+    "quietStart": {
+      "type": "number",
+      "label": "安静时段开始 (小时)",
+      "description": "默认 23。在这个时段内不主动找聊（避免深夜打扰）。",
+      "min": 0,
+      "max": 23,
+      "step": 1
+    },
+    "quietEnd": {
+      "type": "number",
+      "label": "安静时段结束 (小时)",
+      "description": "默认 8。reach 该小时起恢复主动。",
+      "min": 0,
+      "max": 23,
+      "step": 1
+    },
+    "respectRecentReply": {
+      "type": "boolean",
+      "label": "对方刚有动静就推迟",
+      "description": "开启后：若目标群/私聊在 recentReplySilenceMin 分钟内有新消息，先不主动插话。"
+    },
+    "recentReplySilenceMin": {
+      "type": "number",
+      "label": "活跃判定窗口 (分钟)",
+      "description": "respectRecentReply 开启时生效：窗口内有新消息视为「正在聊」，推迟主动。",
+      "min": 5,
+      "max": 240,
+      "step": 5
+    },
+    "probeProfile": {
+      "type": "boolean",
+      "label": "探测资料页",
+      "description": "预留：开启后按目标资料丰富开场素材（当前为占位，不产生请求）。"
+    },
+    "probeQzone": {
+      "type": "boolean",
+      "label": "探测空间动态",
+      "description": "预留：开启后参考目标空间动态找话题（当前为占位，不产生请求）。"
+    },
+    "syncMemory": {
+      "type": "boolean",
+      "label": "同步到记忆",
+      "description": "预留：主动找聊的对话会沉淀进记忆（当前为占位）。"
+    },
+    "autoConsolidate": {
+      "type": "boolean",
+      "label": "自动整理归档",
+      "description": "预留：定期把主动找聊的记录整理归档。"
+    },
+    "targets": {
+      "type": "internal",
+      "label": "目标列表（单个群 / 私聊）",
+      "description": "每个目标一项：{ type: 'auto'|'group'|'private', qq: 'QQ号', name: '备注', enabled: true, minGapMin, maxGapMin, dailyMax, quietStart, quietEnd, topics: ['话题1'], styleHints: '风格提示' }。type=auto 时自动判断目标 QQ 是群还是私聊。"
+    },
+    "scheduledTasks": {
+      "type": "internal",
+      "label": "定时任务（固定时间点发固定内容）",
+      "description": "每天 HH:MM 直发一条固定文本，不走 LLM：{ time: 'HH:MM', type: 'group'|'private', qq: 'QQ号', text: '要发的内容' }。"
+    }
+  },
+  "prompt": null
+}

@@ -1387,7 +1387,7 @@ export function createApp({ log = console.log } = {}) {
   // 声明式路由表（src/routes.js）：把所有依赖一次性注入。
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
-    store, memory, sessions, onebot, orchestrator,
+    store, memory, sessions, onebot, orchestrator, sender,
     emit, log,
     localVersion, compareSemver, UPDATE_INFO_URL,
     sanitizeConfig, keyEndpointAllowed, sanitizeProvider,
@@ -1720,7 +1720,7 @@ export function createApp({ log = console.log } = {}) {
     const result = await loadPlugins({ log });
     for (const st of skillManager.list()) {
       if (st.enabled && st.loaded) {
-        try { skillManager.activate(st.id); } catch (error) { log(`[skill] 激活 ${st.id} 失败：${error?.message ?? error}`); }
+        try { skillManager.activate(st.id, { reason, sender, onebot }); } catch (error) { log(`[skill] 激活 ${st.id} 失败：${error?.message ?? error}`); }
       }
     }
     try { orchestrator.refreshToolDefs(); } catch { /* 刷新失败不影响主流程 */ }

@@ -514,6 +514,11 @@ const LEGACY_SKILL_MIGRATIONS = [
   { from: ['api', 'thinking'], skill: 'thinking-adapters', map: (v) => ({ enabled: v !== false, mode: 'auto' }) },
   // 旧知识库开关（知识库技能尚未移植，先留位；目标不存在时迁移会跳过并记日志）
   { from: ['tools', 'knowledgeEnabled'], skill: 'knowledge-base', map: (v) => ({ enabled: v !== false }) },
+  // 旧版「主动找聊」整块配置（plugins.proactiveChat → skills.proactiveChat）。
+  // 早期版本把 targets/间隔/每日上限/定时任务这些放在 plugins.proactiveChat 下，
+  // 移植重构后没有任何代码消费它（孤儿配置，功能像丢了）——原样搬进 skills 命名空间，
+  // 新插件（id=proactiveChat, plugins/主动找聊）启动即读到；enable===true 时联动技能开关。
+  { from: ['plugins', 'proactiveChat'], skill: 'proactiveChat', map: (v) => ({ ...(v || {}), enabled: (v && v.enable) === true }) },
   // 旧视频理解开关
   { from: ['tools', 'videoEnabled'], skill: 'video-frames', map: (v) => ({ enabled: v !== false }) },
   // 旧表情标注开关

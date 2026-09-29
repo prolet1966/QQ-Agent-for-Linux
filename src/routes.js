@@ -73,6 +73,10 @@ export function createRoutes(deps) {
     return {
       skills: skillManager,
       toolsCfg: cfg.tools || {},
+      // 宿主侧可有可无的运行时对象：确定性插件（如主动找聊）需要直发消息 /
+      // 查群列表 / 查群历史时从这取，缺了则插件自行降级（不报错）。
+      sender: deps.sender ?? null,
+      onebot: deps.onebot ?? null,
       // 与 orchestrator 同款判定：vision 开关开着，且当前模型没有被
       // 视觉扫描判定为 no-vision（曾经只看前半项，模型不支持时
       // 设置页仍显示视觉工具可用，运行时却剔除）
