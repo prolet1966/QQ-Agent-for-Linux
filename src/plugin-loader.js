@@ -434,7 +434,16 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
     } : () => { unregisterToolsBySkill(manifest.id); },
     hooks: (mod.hooks && typeof mod.hooks === 'object') ? mod.hooks : {},
     providers: (mod.providers && typeof mod.providers === 'object') ? mod.providers : {},
-    promptSections: typeof mod.promptSections === 'function' ? mod.promptSections : null
+    promptSections: typeof mod.promptSections === 'function' ? mod.promptSections : null,
+    // 可供路由/外部调用的"手动动作"钩子（如 AI额度情报 的 manualRefresh，
+    // 被 /api/deals/refresh 调用）。与 activate/deactivate 同规则透传。
+    manualRefresh: typeof mod.manualRefresh === 'function' ? mod.manualRefresh : null,
+    // 「免费模型自动探测」扩展点：freePoolStatus 只读现状（设置页打开时拉），
+    // refreshFreePool 强制重探（「立即探测」按钮）。没实现的模块这两个是 null，
+    // 路由会如实回「该模块没有这个能力」而不是假装成功。
+    freePoolStatus: typeof mod.freePoolStatus === 'function' ? mod.freePoolStatus : null,
+    refreshFreePool: typeof mod.refreshFreePool === 'function' ? mod.refreshFreePool : null,
+    clearFreePool: typeof mod.clearFreePool === 'function' ? mod.clearFreePool : null
   };
   skill.loadError = null;
 

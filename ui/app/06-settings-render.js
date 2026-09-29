@@ -1162,6 +1162,50 @@ async function rescanSkills({ quiet = false } = {}) {
 }
 
 /**
+ * 技能设置弹窗里的"模型清单"区（manifest.modelsCatalog → status.catalog）。
+ * 纯函数返回 HTML，不碰 DOM；交互（点选填模型/搜索/情报标注）在 openSkillSettings 绑定。
+ *
+ * 排序：免费置顶 → 低价/免费额度次之 → 其余按清单原顺序。
+ * 免费/低价是 manifest 里人工维护的标记；「AI免费额度情报」的动态命中另由
+ * /api/deals 交叉标注（历史情报刷新是实时的，能补上"人工清单之外的最新免费模型"）。
+ */
+function skillCatalogHtml(catalog, current) {
+  const ranked = catalog
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => {
+      const fa = a.m.free ? 1 : 0, fb = b.m.free ? 1 : 0;
+      if (fa !== fb) return fb - fa;
+      const ca = a.m.cheap ? 1 : 0, cb = b.m.cheap ? 1 : 0;
+      if (ca !== cb) return cb - ca;
+      return a.i - b.i;
+    });
+  const row = ({ m }) => {
+    const badges = (m.free ? '<span class="sks-cat-badge sks-cat-badge-free">免费</span>' : '')
+      + (!m.free && m.cheap ? '<span class="sks-cat-badge sks-cat-badge-cheap">低价/免费额度</span>' : '')
+      + (m.id === current ? '<span class="sks-cat-badge sks-cat-badge-cur">当前</span>' : '');
+    const link = m.url
+      ? `<a class="sks-cat-link" href="#" data-url="${esc(m.url)}" title="打开官网 / API 平台文档（系统浏览器）">官网 ↗</a>`
+      : '';
+    return `<div class="sks-cat-row${m.id === current ? ' sks-cat-row--cur' : ''}" data-model="${esc(m.id)}">
+      <span class="sks-cat-badges">${badges}</span>
+      <span class="sks-cat-name">${esc(m.name || m.id)}</span>
+      <span class="sks-cat-prov">${esc(m.provider || '')}</span>
+      <code class="sks-cat-id">${esc(m.id)}</code>
+      <span class="sks-cat-note">${esc(m.note || '')}</span>
+      ${link}
+    </div>`;
+  };
+  return `<div class="sks-catalog" id="skset-catalog">
+    <div class="sks-catalog__head">
+      <div class="sks-catalog__title">🎨 文生图模型清单<span class="sks-catalog__hint">免费置顶 · 点选即填入「模型 id」</span></div>
+      <input type="search" class="sks-catalog__search" id="skset-cat-search" placeholder="搜模型名 / 模型 id / 平台 / 备注…" autocomplete="off" />
+    </div>
+    <div class="sks-catalog__deals" id="skset-cat-deals"><div class="sks-cat-loading">正在读取「AI免费额度情报」…</div></div>
+    <div class="sks-catalog__list">${ranked.map(row).join('')}</div>
+  </div>`;
+}
+
+/**
  * 技能设置弹窗。
  *
  * 为什么把设置放在技能自己的弹窗里（而不是塞进设置页）：
@@ -1174,6 +1218,69 @@ async function rescanSkills({ quiet = false } = {}) {
  * 支持的 type：boolean（复选框）/ number（数字输入）/ enum（下拉）/ string（文本框）
  * 另外 secret: true 的字段用密码框，且留空 = 不修改（后端也按同一约定处理）。
  */
+/**
+ * 「免费模型自动探测」区块（只有实现了该扩展点的技能才有内容）。
+ * 纯函数返回 HTML，交互在 openSkillSettings 里绑定。
+ *
+ * 设计取向：把"现在到底能用哪个免费模型、为什么别的不能用"摆在最显眼的位置。
+ * 这个技能的价值承诺是"只用免费模型"，用户有权随时核对这条承诺是否成立 ——
+ * 只在日志里说一句"可用 1 个"是不够的。
+ */
+function freePoolHtml(data) {
+  const pool = data?.pool || {};
+  const sources = Array.isArray(pool.sources) ? pool.sources : [];
+  const updated = pool.updatedAt ? fmtTime(pool.updatedAt) : '还没探测过';
+  const okCount = Number(pool.available) || 0;
+  const total = Number(pool.total) || sources.length;
+  const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  // 探测清单里"需 key"的源，标出这个 key 填到哪儿（设置项槽位 / 环境变量）
+  const keyHint = (id) => {
+    const c = candidates.find((x) => x.id === id) || {};
+    const slots = [c.keySlot ? `freeKeys.${c.keySlot}` : '', ...(c.envKeys || [])].filter(Boolean);
+    return slots.length ? `（${slots.join(' 或 ')}）` : '';
+  };
+  const state = (s) => {
+    if (s.needsKey) return { cls: 'need', text: `需要你自己的 key${keyHint(s.id)}` };
+    if (s.aliasOf) return { cls: 'alias', text: s.reason || '别名，已跳过' };
+    if (s.cooling) return { cls: 'wait', text: `冷却中，${s.cooldownLeftMin} 分钟后` };
+    if (s.ok) return { cls: 'ok', text: s.degraded ? `可用（本次探测失败，沿用上次）· ${s.reason}` : '可用' };
+    return { cls: 'no', text: s.reason || '不可用' };
+  };
+  const rows = sources.map((s) => {
+    const st = state(s);
+    const tier = s.tier === 'keyless' ? '<span class="fp-badge fp-badge-keyless">免 key</span>' : '<span class="fp-badge fp-badge-key">免费额度</span>';
+    const cur = pool.current === s.id ? '<span class="fp-badge fp-badge-cur">轮换到它</span>' : '';
+    return `<div class="fp-row fp-row--${st.cls}">
+      <span class="fp-dot"></span>
+      <span class="fp-name">${esc(s.name)}</span>
+      <span class="fp-prov">${esc(s.provider || '')}</span>
+      ${tier}${cur}
+      <code class="fp-model">${esc(s.model || '')}</code>
+      <span class="fp-state">${esc(st.text)}</span>
+      <span class="fp-ms">${s.ms ? esc(String(s.ms)) + 'ms' : ''}</span>
+    </div>`;
+  }).join('');
+  const order = (pool.order || []).map((id) => esc(sources.find((s) => s.id === id)?.name || id)).join(' → ');
+  const noKey = candidates.filter((c) => c.tier === 'free-quota').length;
+  return `<div class="sks-freepool" id="skset-fp">
+    <div class="sks-catalog__head">
+      <div class="sks-catalog__title">🆓 免费模型自动探测<span class="sks-catalog__hint">真出一张小图验证 · 可用的按顺序轮换用</span></div>
+      <span class="spacer"></span>
+      <button class="btn btn-small" id="skset-fp-refresh" title="立刻重新探测一遍所有免费源（会真的各出一张小图）">立即探测</button>
+      <button class="btn btn-small" id="skset-fp-clear" title="清空免费池：清空后下次出图会重新探测">清空</button>
+    </div>
+    <div class="fp-sum">
+      <b>${okCount}</b> / ${total} 个可用${order ? ` · 轮换顺序：${order}` : ''}
+      <span class="fp-sum__time">（探测于 ${esc(updated)}）</span>
+    </div>
+    ${pool.hint ? `<div class="fp-hint">${esc(pool.hint)}</div>` : ''}
+    <div class="fp-list">${rows || '<div class="sks-cat-loading">还没有探测结果，点「立即探测」试一次。</div>'}</div>
+    ${noKey ? `<div class="fp-tip">还有 ${noKey} 个平台是"免费额度、需你自己的 key"（硅基流动 / 智谱 / 百炼 / 混元 / 魔搭）。
+      填了 key 它们会被自动探测并加入轮换 —— 程序不会替你注册账号。</div>` : ''}
+    ${data.freeOnly ? '<div class="fp-tip fp-tip--on">已开启「只用免费模型」：下面手填的接口不参与出图；探测不到可用源时直接不出图，不会用到付费接口。</div>' : '<div class="fp-tip fp-tip--warn">已关闭「只用免费模型」：免费池里没有可用源时会回落到手填接口，那可能计费。</div>'}
+  </div>`;
+}
+
 /**
  * 生成技能设置弹窗的 HTML（**纯函数**，不碰 DOM）。
  *
@@ -1248,6 +1355,12 @@ function renderSkillSettingsModal(skill) {
     keyGroups.push({ head: fieldHtml(k) });
   }
 
+  // manifest.modelsCatalog（经 status.catalog 透传）→ 弹窗底部的模型清单
+  const catalog = Array.isArray(skill.catalog) ? skill.catalog : [];
+  // 当前选中的模型 id：settings 里脱敏视图的值（无 model 字段的技能自然为空）
+  const curModel = String(values?.model ?? skill.settings?.model ?? '').trim();
+  const catalogHtml = catalog.length ? skillCatalogHtml(catalog, curModel) : '';
+
   return { html: `<div class="modal skill-modal" role="dialog" aria-modal="true" aria-label="${esc(skill.name)} 设置">
     <div class="skill-modal__head">
       <div class="skill-modal__titles">
@@ -1265,6 +1378,8 @@ function renderSkillSettingsModal(skill) {
         共 <b>${allKeys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个技能会读到它们。改动即时生效，无需重启。
       </div>
       <div class="skill-form">${keyGroups.map((x) => x.head).join('')}</div>
+      <div id="skset-freepool"></div>
+      ${catalogHtml}
     </div>
     <div class="skill-modal__foot">
       <!-- 上传到市场：从卡片上收进来（卡片只留开关 + 设置，低频动作不常驻） -->
@@ -1383,6 +1498,187 @@ function openSkillSettings(skillId) {
       alert(`保存失败：${err.message}`);
     }
   });
+
+  // ── 免费模型自动探测（只有实现了该扩展点的技能才有内容）──
+  // 为什么要问一次后端再决定渲不渲染：扩展点是宿主透传钩子（plugin-loader 白名单），
+  // 前端不硬编码技能 id 去猜"哪个技能该显示这一块" —— 那样每加一个支持该能力的
+  // 技能都得改前端，而漏改的后果是"功能有、界面没有"（比反过来更难排查）。
+  const fpBox = overlay.querySelector('#skset-freepool');
+  if (fpBox) {
+    const paint = (data) => { fpBox.innerHTML = freePoolHtml(data || {}); };
+    const loadFreePool = async () => {
+      try {
+        const r = await api(`/api/skills/${encodeURIComponent(skillId)}/free-models`);
+        // 后端明确回"没有这个能力" → 什么都不渲染，弹窗保持原样
+        if (!r || r.ok !== true || !r.pool) { fpBox.innerHTML = ''; return; }
+        paint(r);
+        fpBox.querySelector('#skset-fp-refresh')?.addEventListener('click', async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          btn.textContent = '探测中…';
+          try {
+            const r2 = await api(`/api/skills/${encodeURIComponent(skillId)}/free-models/refresh`, { method: 'POST' });
+            if (r2?.ok === true) {
+              paint({ ...r, ...r2, freeOnly: r.freeOnly, candidates: r.candidates });
+            } else {
+              alert(`探测失败：${r2?.error || '后端没有回报结果'}`);
+              await loadFreePool();
+            }
+          } catch (err) {
+            alert(`探测失败：${err.message}`);
+            await loadFreePool();
+          } finally {
+            btn.disabled = false;
+            btn.textContent = '立即探测';
+          }
+        });
+        fpBox.querySelector('#skset-fp-clear')?.addEventListener('click', async () => {
+          // 「清空」= 删掉探测缓存，不是"停用免费模型"。开着自动探测的话，
+          // 下次出图会重新探测 —— 这一点必须写进确认框，否则用户以为关掉了。
+          if (!confirm('清空免费模型池？\n\n'
+            + '· 只是删掉探测缓存（池子是缓存，不是配置）\n'
+            + '· 开着「自动探测」的话，下次出图会立刻重新探测一遍\n'
+            + '· 想彻底不再用免费模型，请去关「只用免费模型」或关掉本技能')) return;
+          try {
+            const r2 = await api(`/api/skills/${encodeURIComponent(skillId)}/free-models/clear`, { method: 'POST' });
+            if (r2?.ok === true) paint({ ...r, ...r2, freeOnly: r.freeOnly, candidates: r.candidates });
+            else alert(`清空失败：${r2?.error || '后端没有回报结果'}`);
+          } catch (err) { alert(`清空失败：${err.message}`); }
+        });
+      } catch { /* 后端没这个路由（老版本）→ 静默不渲染 */ }
+    };
+    void loadFreePool();
+  }
+
+  // ── 模型清单交互（带 modelsCatalog 的技能，如 image-generate）──
+  const catRoot = overlay.querySelector('#skset-catalog');
+  if (catRoot) {
+    // 清单数据从当前 skill 取；「模型 id」输入框按字段 id 约定定位
+    const catalogList = Array.isArray(skill.catalog) ? skill.catalog : [];
+    const modelInput = overlay.querySelector(`#skset-${skillId}-model`);
+    const search = overlay.querySelector('#skset-cat-search');
+    const dealBox = overlay.querySelector('#skset-cat-deals');
+    const rows = () => [...catRoot.querySelectorAll('.sks-cat-row')];
+
+    // 点选模型：填进「模型 id」输入框并高亮
+    const pick = (id) => {
+      if (!modelInput) return;
+      modelInput.value = id;
+      rows().forEach((r) => r.classList.toggle('sks-cat-row--cur', r.dataset.model === id));
+    };
+    catRoot.addEventListener('click', (e) => {
+      const link = e.target.closest('a.sks-cat-link');
+      if (link) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (link.dataset.url) window.open(link.dataset.url, '_blank', 'noopener');
+        return;
+      }
+      const row = e.target.closest('.sks-cat-row');
+      if (row) pick(row.dataset.model);
+    });
+
+    // 搜索过滤：名称 / 模型 id / 平台 / 备注 任一命中即显示
+    search?.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      rows().forEach((r) => {
+        r.style.display = !q || (r.textContent || '').toLowerCase().includes(q) ? '' : 'none';
+      });
+    });
+
+    // 「AI免费额度情报」交叉标注 + 最新免费/低价情报条
+    // renderDeals 可重入：点"立即刷新"后重拉 /api/deals 重新渲染整条情报区
+    const renderDeals = async () => {
+      let deals = [], dealsEnabled = true;
+      try {
+        const r = await api('/api/deals');
+        deals = Array.isArray(r?.items) ? r.items : [];
+        dealsEnabled = r?.enabled !== false;
+      } catch { /* 后端不可用：保持空清单，走"暂无数据"分支 */ }
+
+      // 1) 关键词命中：清单模型 id/名称/平台 命中情报标题 → 打「情报」徽章
+      const hit = new Map();   // modelId -> 命中情报标题
+      for (const row of rows()) {
+        const meta = catalogList.find((m) => m.id === row.dataset.model);
+        if (!meta) continue;
+        const kws = (Array.isArray(meta.keywords) ? meta.keywords : []).map((k) => String(k).toLowerCase()).filter(Boolean);
+        const matched = deals.filter((d) => {
+          const hay = String(`${d.title || ''} ${d.brand || ''}`).toLowerCase();
+          return kws.some((k) => hay.includes(k));
+        });
+        if (matched.length) hit.set(meta.id, matched[0].title || matched[0].brand || '');
+      }
+      for (const row of rows()) {
+        const t = hit.get(row.dataset.model);
+        if (!t) continue;
+        const b = document.createElement('span');
+        b.className = 'sks-cat-badge sks-cat-badge-deal';
+        b.textContent = '情报';
+        b.title = `「AI免费额度情报」命中：${t}`;
+        row.querySelector('.sks-cat-badges')?.appendChild(b);
+      }
+
+      // 2) 情报条：空则提示（未开启 → 一键开启）；有则列最新免费/低价 5 条
+      if (!dealBox) return;
+      if (!deals.length) {
+        dealBox.innerHTML = dealsEnabled
+          ? '<div class="sks-cat-deals-empty">📡 「AI免费额度情报」暂无数据（每天凌晨 4 点自动刷新）。</div>'
+            + '<button class="btn btn-small" id="skset-deals-refresh" style="margin-top:6px">立即刷新（现在抓取）</button>'
+          : '<div class="sks-cat-deals-empty">📡 未开启「AI免费额度情报」技能 —— 开启后这里会实时标注清单里的免费/低价模型，并展示最新 AI 模型/额度动态。</div>'
+            + '<button class="btn btn-small" id="skset-deals-enable" style="margin-top:6px">开启「AI免费额度情报」</button>';
+        overlay.querySelector('#skset-deals-refresh')?.addEventListener('click', async () => {
+          try {
+            await api('/api/deals/refresh', { method: 'POST' });
+            await renderDeals();
+          } catch (err) { alert(`刷新失败：${err.message}`); }
+        });
+        overlay.querySelector('#skset-deals-enable')?.addEventListener('click', async () => {
+          try {
+            await api('/api/skills/api-deals', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+            await renderDeals();
+          } catch (err) { alert(`开启失败：${err.message}`); }
+        });
+        return;
+      }
+      const latest = deals
+        .filter((d) => /(免费|白嫖|降价|低价|额度|credits|free|trial|试用|模型)/i.test(String(`${d.title || ''} ${d.amount || ''}`)))
+        .slice(0, 5);
+      dealBox.innerHTML = '<div class="sks-cat-deals-title">📡 最新免费 / 低价情报'
+        + '<button class="btn btn-small sks-cat-deals-rbtn" id="skset-deals-refresh2" title="重新抓取情报源">立即刷新</button>'
+        + '<span class="sks-cat-deals-src">数据源：AI免费额度情报 · yangmao/linux.do</span></div>'
+        + '<div class="sks-cat-deals-list">'
+        + (latest.length ? latest.map((d) => {
+            const a = String(d.amount || '').trim();
+            return `<a href="#" class="sks-cat-deal" data-url="${esc(d.url || '')}" title="${esc(d.title || '')}">
+                <span class="sks-cat-deal-t">${esc((d.title || '').slice(0, 64))}</span>
+                ${a ? `<span class="sks-cat-deal-a">${esc(a.slice(0, 48))}</span>` : ''}
+                <span class="sks-cat-deal-s">${esc(d.source || '')}</span>
+              </a>`;
+          }).join('') : '<div class="sks-cat-deals-empty">暂无匹配的免费/低价条目，可到 <a href="https://yangmao.ai/zh/deals/" class="sks-cat-link" data-url="https://yangmao.ai/zh/deals/" style="display:inline">yangmao.ai 情报站</a> 查看全量。</div>')
+        + '</div>';
+      if (hit.size) {
+        const tip = document.createElement('div');
+        tip.className = 'sks-cat-deals-hit';
+        tip.textContent = `🎯 清单中 ${hit.size} 个模型与当前情报关键词命中（可把鼠标悬停在「情报」徽章上看对应条目）`;
+        dealBox.appendChild(tip);
+      }
+      // 情报外链走系统默认浏览器（Electron 里 setWindowOpenHandler 会转 openExternal）
+      dealBox.addEventListener('click', (e) => {
+        const a = e.target.closest('a.sks-cat-deal, a.sks-cat-link[data-url]');
+        if (!a?.dataset?.url) return;
+        e.preventDefault();
+        window.open(a.dataset.url, '_blank', 'noopener');
+      });
+      // 顶部"立即刷新"按钮（有数据态）
+      overlay.querySelector('#skset-deals-refresh2')?.addEventListener('click', async () => {
+        try {
+          await api('/api/deals/refresh', { method: 'POST' });
+          await renderDeals();
+        } catch (err) { alert(`刷新失败：${err.message}`); }
+      });
+    };
+    void renderDeals();
+  }
 }
 
 /**

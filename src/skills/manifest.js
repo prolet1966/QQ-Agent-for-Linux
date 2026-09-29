@@ -108,6 +108,10 @@ export function normalizeManifest(raw, { fallbackId = '' } = {}) {
       capabilities,
       configSchema: (raw.configSchema && typeof raw.configSchema === 'object') ? raw.configSchema : {},
       settings: (raw.settings && typeof raw.settings === 'object' && !Array.isArray(raw.settings)) ? raw.settings : {},
+      // 模型清单扩展：image-generate 等技能用它声明"模型列表 + 官网/API 平台链接 +
+      // 免费/低价标记"，UI 在设置弹窗里渲染成可点选的清单（免费置顶、可配合
+      // AI免费额度情报做动态交叉标注）。必须透传，否则清单会静默消失。
+      modelsCatalog: Array.isArray(raw.modelsCatalog) ? raw.modelsCatalog : [],
       prompt: normalizePrompt(raw.prompt),
       deprecated: raw.deprecated === true
     },

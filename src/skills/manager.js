@@ -275,6 +275,9 @@ export class SkillManager {
       // 放在列表里而不是让前端再发一次请求：技能页本来就要拉一次列表。
       settings: this.settingsView(id),
       configSchema: (m.configSchema && typeof m.configSchema === 'object') ? m.configSchema : {},
+      // 模型清单：manifest 里声明的可选扩展（如 image-generate 的 modelsCatalog）。
+      // 与 configSchema 同理进白名单视图，供 UI 在设置弹窗里渲染"模型列表 + 官网链接"。
+      catalog: Array.isArray(m.modelsCatalog) ? m.modelsCatalog : [],
       requires: [...(m.requires || [])],
       missingRequires: missing,
       toolIds: [...(skill.toolIds || [])]

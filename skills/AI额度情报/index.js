@@ -132,6 +132,11 @@ function maybeRefresh() {
   }
 }
 
+/** 供路由 /api/deals/refresh 与外部调用：忽略"整点才刷"限制，立刻抓一次。 */
+export function manualRefresh(logFn) {
+  return refresh(logFn);
+}
+
 export function setup(api) {
   cfg = api.config;
   log = (...a) => api.log?.(...a);

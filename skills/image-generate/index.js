@@ -7,6 +7,15 @@
 //   · 图片交付统一走 ctx.sender.sendImage（自带发送队列 / 限频 / 去重）
 //   · available() 必须是同步函数（可用性判定走同步调用链）
 //
+// ── 免费模型自动探测 + 轮换（free-models.js）──────────────────────────────
+// 默认「只用免费模型」：出图前按 free-models 的清单逐个真出一张小图来验证，
+// 通过的进池，然后**按轮换顺序依次使用**（次第用之，把额度和限流摊平）。
+// 探测不到任何免费模型 → 出图配置置空、拒绝出图，**绝不**回落到用户手填的
+// 可能计费的接口（手填配置只在显式关闭「只用免费模型」时才生效）。
+// 为什么主流程基本没变：适配器把非 OpenAI 协议的免费源（Pollinations 这种
+// GET 直出图片的）转成 OpenAI 的 {data:[{b64_json}]} 形状，下载/解码/落盘/
+// 发送那条成熟链路一行都不用改。
+//
 // ── 为什么要把图片「下载回来再发」（实测教训）────────────────────────────
 // 第一版是直接把接口返回的图片 URL 交给协议端，让它自己去下载。
 // 实测 gpt-image-2 返回的是海外图床地址（disk.aipais.de），协议端要
@@ -23,6 +32,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as freeModels from './free-models.js';
 
 let cfg = () => ({});
 let log = () => {};
@@ -52,6 +62,16 @@ const DOWNLOAD_ATTEMPTS = 2;
 const DOWNLOAD_RETRY_DELAY_MS = 1200;
 const KEEP_FILES = 20;                  // 本地留档保留最近多少张
 const RESPONSE_FORMATS = ['auto', 'url', 'b64_json'];
+// 出图前先按这个间隔判断"免费池新不新"；到期才联网重探（免 key 的源很便宜，
+// 但也没必要每张图都探一遍）
+const DEFAULT_PROBE_INTERVAL_MIN = 60;
+const DEFAULT_ROTATE_FALLBACK = 2;      // 一次最多试 1+2 = 3 个免费源
+const MAX_ROTATE_FALLBACK = 5;
+const MIN_IMAGE_BYTES = 512;            // 比这更小的响应基本不是图片
+// 免 key 免费源（GET 直出图片那类）的出图超时上限。实测它 1~5 秒就出图、被限流
+// 时 2 秒内秒回 402 —— 所以 25 秒还没动静就基本可以断定这次不行。硬等 120 秒
+// 只会让群友在 QQ 里干等，还把"顺延到下一个免费源"的时间一起赔进去。
+const KEYLESS_TIMEOUT_MS = 25000;
 
 /**
  * 构建标记：加载时打进日志。
@@ -60,7 +80,7 @@ const RESPONSE_FORMATS = ['auto', 'url', 'b64_json'];
  * 必须能一眼区分。没有这行标记就只能靠推理（本次为此绕了好几轮）。
  * 看到这行日志 = 新代码已加载；看不到 = 进程还是旧的，重启即可。
  */
-const BUILD_TAG = 'v1.2.0-local-file-send';
+const BUILD_TAG = 'v1.3.0-free-pool-rotate';
 
 export function setup(api) {
   cfg = api.config;
@@ -93,17 +113,23 @@ export function setup(api) {
       }
 
       const settings = readSettings();
-      const missing = missingConfig(settings);
-      if (missing.length) {
-        return fail(`文生图还没配置：缺 ${missing.join(' / ')}。请到控制台设置页的「文生图」里填好。`);
-      }
-
       const count = clamp(Number(args?.count) || 1, 1, MAX_COUNT);
       const size = String(args?.size ?? '').trim() || settings.defaultSize;
 
+      // ── 免费模型自动探测 + 轮换（探测不到就置空，绝不落到可能计费的接口）──
+      const { targets, pool } = await resolveTargets(settings);
+      if (!targets.length) {
+        return fail(noTargetMessage(settings, pool));
+      }
+
       try {
-        // ── 2) 调接口（瞬时故障自动重试，见 callWithRetry 里的安全性说明）──
-        const { payload, retried } = await callWithRetry(settings, buildBody(settings, prompt, size, count));
+        // ── 2) 调接口（免费源按轮换顺序依次试；瞬时故障重试见 callWithRetry）──
+        const { payload, retried, used } = await callTargets(
+          targets, pool, (target) => buildBody(target, prompt, size, count)
+        );
+        // 后续的物化/发送都用**实际用的那个源**的设置（每源可能有不同的超时/体积上限）
+        const usedSettings = used || settings;
+        const sourceTag = used?.sourceId && used.sourceId !== 'manual' ? ` · ${used.sourceName}` : '';
 
         // ── 3) 解析出图片引用（可能是 url，也可能是 base64）─────────────────
         const refs = extractImages(payload);
@@ -116,7 +142,7 @@ export function setup(api) {
         const prepFailed = [];
         for (const [index, ref] of refs.entries()) {
           try {
-            ready.push(await materialize(settings, ref, index));
+            ready.push(await materialize(usedSettings, ref, index));
           } catch (error) {
             // humanizeError 而不是 describeError：后者会把原始 DOMException
             // 渲染成 `[23] The operation was aborted...` 直接给用户看（真实事故）。
@@ -151,12 +177,12 @@ export function setup(api) {
           }
         }
         if (sent) {
-          log(`生成并发送 ${sent} 张（模型 ${settings.model}${size ? `，尺寸 ${size}` : ''}${retried ? '，重试后成功' : ''}）`);
+          log(`生成并发送 ${sent} 张（模型 ${usedSettings.model}${sourceTag}${size ? `，尺寸 ${size}` : ''}${retried ? '，重试后成功' : ''}）`);
           try { ctx.emit?.('session-update', ctx.session?.id); } catch { /* 上报失败不影响已发出的图 */ }
         }
         if (!sent) {
           return fail(`图画出来了但发送失败：${sendFailed.join('；')}。`
-            + '这通常是协议端到 QQ 的链路问题（不是画图的问题），不要为此重新生成图片 —— 那只会再花一次钱。'
+            + '这通常是协议端到 QQ 的链路问题（不是画图的问题），不要为此重新生成图片 —— 免费模型重画也拿不回已发出的图。'
             + '把上面的原因告诉群友即可。');
         }
 
@@ -165,7 +191,7 @@ export function setup(api) {
         if (prepFailed.length) notes.push(`（另有 ${prepFailed.length} 张无效：${prepFailed.join('；')}）`);
         if (sendFailed.length) notes.push(`（另有 ${sendFailed.length} 张发送失败：${sendFailed.join('；')}）`);
         return {
-          content: `已生成 ${sent} 张图片并直接发到当前会话（模型 ${settings.model}${size ? `，尺寸 ${size}` : ''}）${notes.join('')}。`
+          content: `已生成 ${sent} 张图片并直接发到当前会话（模型 ${usedSettings.model}${sourceTag}${size ? `，尺寸 ${size}` : ''}）${notes.join('')}。`
             + '注意：你看不到生成的画面，所以不要描述画面细节、也不要编造内容，更不要再调用发图工具；'
             + '一句自然的收尾就够了。'
         };
@@ -183,16 +209,18 @@ export const providers = {
   'image.generate': async ({ prompt, size, count } = {}) => {
     try {
       const settings = readSettings();
-      const missing = missingConfig(settings);
-      if (missing.length) return { ok: false, error: `文生图未配置：缺 ${missing.join(' / ')}` };
-
       const text = String(prompt || '').trim();
       if (!text) return { ok: false, error: '缺少 prompt' };
 
-      const { payload } = await callWithRetry(
-        settings,
-        buildBody(settings, text, String(size || '').trim() || settings.defaultSize, clamp(Number(count) || 1, 1, MAX_COUNT))
+      // 与 draw 工具走同一条路：免费池轮换 + 顺延，探测不到就如实说不行
+      const { targets, pool } = await resolveTargets(settings);
+      if (!targets.length) return { ok: false, error: noTargetMessage(settings, pool) };
+
+      const { payload, used } = await callTargets(
+        targets, pool,
+        (target) => buildBody(target, text, String(size || '').trim() || settings.defaultSize, clamp(Number(count) || 1, 1, MAX_COUNT))
       );
+      const usedSettings = used || settings;
       const refs = extractImages(payload);
       if (!refs.length) return { ok: false, error: '接口没有返回图片' };
 
@@ -200,7 +228,7 @@ export const providers = {
       const problems = [];
       for (const [index, ref] of refs.entries()) {
         try {
-          const done = await materialize(settings, ref, index);
+          const done = await materialize(usedSettings, ref, index);
           images.push({ dataUrl: done.dataUrl, filePath: done.filePath, mime: done.mime, bytes: done.bytes });
         } catch (error) {
           // 逐张抛掉原因就等于把排障线索扔了（原写法只回一句"图片拿到了但无法使用"，
@@ -213,7 +241,7 @@ export const providers = {
       if (!images.length) {
         return { ok: false, error: `图片拿到了但无法使用：${problems.join('；') || '未知原因'}` };
       }
-      return { ok: true, images };
+      return { ok: true, images, source: used?.sourceName || '', model: used?.model || '' };
     } catch (error) {
       return { ok: false, error: humanizeError(error) };
     }
@@ -223,24 +251,34 @@ export const providers = {
 /**
  * 依赖自检：缺配置就直说，别让界面显示「生效中」而调用时才发现画不了。
  * ⚠️ 必须是同步函数 —— 可用性判定走同步调用链，返回 Promise 会被当成「可用」。
- * 这里只读内存里的配置，没有 IO，所以同步判断是安全的。
+ * 这里只读内存里的配置 + 磁盘上的池子（都是同步 IO），没有网络请求。
  */
 export function available() {
-  const missing = missingConfig(readSettings());
+  const settings = readSettings();
+  if (settings.freeOnly) {
+    const summary = freeModels.poolSummary();
+    if (!summary.available) {
+      return { ok: false, reason: `免费模型池现在没有可用源（不使用付费模型）。${summary.hint}` };
+    }
+    const head = summary.sources.find((s) => s.id === summary.current);
+    const more = summary.available > 1 ? `，共 ${summary.available} 个自动轮换` : '（只有 1 个免费源，暂不轮换）';
+    return { ok: true, reason: `免费模型：${head?.name || summary.current}${more}` };
+  }
+  const missing = missingConfig(settings);
   if (missing.length) return { ok: false, reason: `还没配置：${missing.join(' / ')}（在设置页「文生图」里填）` };
   return { ok: true };
 }
 
 /** 动态提示词片段：配置好了才告诉模型「你有画图工具」，没配就不占 token。 */
 export function promptSections() {
-  if (missingConfig(readSettings()).length) return [];
+  if (!available().ok) return [];
   return [{
     id: 'image-generate-note',
     title: '文生图',
     priority: 35,
     content: '群友让你画图/生成图片时，用 draw 工具（prompt 写清画面，多张用 count），它会把图直接发到当前会话。'
       + '你看不到生成结果，所以不要描述画面细节，也不要再调发图工具。'
-      + '画图又慢又贵，接口失败最多重试一次，不要连着试好几次；发不出去时更不要重新生成。'
+      + '接口在免费模型之间自动轮换：某个源失败会自动换下一个，你不用重试；发不出去时更不要重新生成。'
   }];
 }
 
@@ -266,7 +304,16 @@ function readSettings() {
       MAX_DOWNLOAD_TIMEOUT_MS
     ),
     maxRetries: clamp(Number.isFinite(retries) ? retries : DEFAULT_MAX_RETRIES, 0, 3),
-    maxImageBytes: clamp(Number(c.maxImageMB) || DEFAULT_MAX_IMAGE_MB, 1, MAX_IMAGE_MB_CEIL) * 1024 * 1024
+    maxImageBytes: clamp(Number(c.maxImageMB) || DEFAULT_MAX_IMAGE_MB, 1, MAX_IMAGE_MB_CEIL) * 1024 * 1024,
+    // ── 免费模型自动探测 ──
+    // freeOnly 默认 **true**：只用免费模型，探测不到就置空、拒绝出图。
+    // 三个开关都取「未配置时的默认」，不能写成 !!c.x —— 那会把没配过的技能
+    // 判成 false，等于把"防误用付费"这层保护反过来（历史踩坑点）。
+    freeOnly: c.freeOnly === undefined || c.freeOnly === null || c.freeOnly === '' ? true : !!c.freeOnly,
+    autoFree: c.autoFree === undefined || c.autoFree === null || c.autoFree === '' ? true : !!c.autoFree,
+    probeIntervalMin: clamp(Number(c.probeIntervalMin) || DEFAULT_PROBE_INTERVAL_MIN, 5, 1440),
+    rotateFallback: clamp(Number(c.rotateFallback) || DEFAULT_ROTATE_FALLBACK, 0, MAX_ROTATE_FALLBACK),
+    freeKeys: String(c.freeKeys || '').trim()
   };
 }
 
@@ -276,6 +323,147 @@ function missingConfig(settings) {
   if (!settings.apiKey) missing.push('API Key');
   if (!settings.model) missing.push('模型 id');
   return missing;
+}
+
+// ── 免费池：探测 / 轮换 / 顺延 ────────────────────────────────────────────
+// 并发去重：三个群同时让人画图，也只探一次（探测是联网的，不该被打成三份）
+let poolBusy = null;
+
+/**
+ * 拿一个"够新"的免费池；过期才联网重探。
+ * @param {object} settings readSettings() 的结果
+ * @param {boolean} force true = 无视有效期立刻重探（UI 的「立即探测」走这里）
+ */
+async function ensurePool(settings, { force = false } = {}) {
+  const current = freeModels.loadPool();
+  if (!settings.autoFree && !force) return current;
+  // 空池的探测周期要短得多。原因很实在：探测结果为空时，"什么时候再探"就决定了
+  // 用户要等多久才能画图。而空池最常见的成因是**瞬时**故障（免 key 源被限流、
+  // 边缘节点抖动），几分钟后重探大概率就通了。让它干等满周期（比如 1 小时）
+  // 等于"明明有免费模型，却白等一小时"。
+  const emptyRetryMs = freeModels.EMPTY_POOL_RETRY_MS;
+  const intervalMs = current.updatedAt && freeModels.poolSummary(current).available === 0
+    ? Math.min(settings.probeIntervalMin * 60 * 1000, emptyRetryMs)
+    : settings.probeIntervalMin * 60 * 1000;
+  const age = Date.now() - Date.parse(current.updatedAt || '');
+  if (!force && current.updatedAt && Number.isFinite(age) && age < intervalMs) return current;
+  if (poolBusy) return poolBusy;
+
+  poolBusy = freeModels
+    .discoverFree({ fetch: apiFetch, settings, minIntervalMs: intervalMs, force })
+    .then((result) => {
+      const names = freeModels.poolSummary(result.pool).order.length;
+      log(`免费模型探测完成：可用 ${result.available} 个（本次探测 ${result.probed}、沿用上次 ${result.reused}）`);
+      if (!result.available) {
+        warn('未探测到任何可用免费模型 —— 出图接口保持置空，本次不会使用付费模型。'
+          + '若要用硅基流动/智谱/百炼/混元/魔搭的免费档，请填入设置项「免费额度平台 Key」后重新探测。');
+      }
+      void names;
+      return result.pool;
+    })
+    .catch((error) => {
+      // 探测失败不是致命错误：沿用旧池子（可能是好的），最坏是按"无可用"处理
+      warn(`免费模型探测失败（沿用上次结果）：${describeError(error)}`);
+      return current;
+    })
+    .finally(() => { poolBusy = null; });
+  return poolBusy;
+}
+
+/** 把池条目拼成一次调用需要的完整设置。密钥现取现用，不落盘到池子文件。 */
+function entryToSettings(base, entry) {
+  const source = freeModels.FREE_SOURCES.find((s) => s.id === entry.id) || {};
+  const { key } = freeModels.resolveKey(source, base);
+  const merged = {
+    ...base,
+    kind: entry.kind || source.kind || 'openai',
+    sourceId: entry.id,
+    sourceName: entry.name || entry.id,
+    apiKey: key,
+    model: entry.model || source.model || '',
+    // 多张连出时的礼貌间隔（免 key 源限流，要 key 的源为 0）
+    politeGapMs: freeModels.politeGapMs({ sources: [entry] }, entry.id)
+  };
+  if (merged.kind === 'image-get') {
+    merged.url = entry.url || source.url || '';
+    merged.baseUrl = '';
+    merged.endpoint = '';
+  } else {
+    merged.baseUrl = entry.baseUrl || source.baseUrl || '';
+    merged.endpoint = resolveEndpoint(merged.baseUrl);
+  }
+  return merged;
+}
+
+/**
+ * 决定这一次调用能用哪些接口。
+ * 顺序：池子里的免费源（轮换序，可顺延几个）→ 只有显式关掉「只用免费模型」
+ * 才把手填配置作为兜底。免费源一个都没有时返回空数组，调用方必须拒绝出图
+ * （这是"不用付费模型"这条要求的落地点）。
+ */
+async function resolveTargets(settings, { force = false } = {}) {
+  const pool = await ensurePool(settings, { force });
+  const targets = freeModels
+    .pickRotated(pool, settings.rotateFallback + 1)
+    .map((entry) => entryToSettings(settings, entry));
+  if (targets.length) freeModels.savePool(pool);   // 游标已推进，落盘（次第用之）
+  if (targets.length) return { targets, pool };
+  if (!settings.freeOnly && settings.baseUrl && settings.apiKey && settings.model) {
+    return {
+      targets: [{ ...settings, kind: 'openai', sourceId: 'manual', sourceName: '手填接口' }],
+      pool
+    };
+  }
+  return { targets: [], pool };
+}
+
+/**
+ * 一个可用目标都没有时给用户看的话。
+ * 「限流冷却中」和「探测不到免费模型」的下一步动作完全不同（等 vs 改配置），
+ * 所以先看池子自己算出来的 hint，别一律报"未探测到"。
+ */
+function noTargetMessage(settings, pool) {
+  if (!settings.freeOnly) {
+    const missing = missingConfig(settings);
+    return missing.length
+      ? `文生图还没配置：缺 ${missing.join(' / ')}。到设置页「文生图」里填好，或开启「只用免费模型」让系统自动探测。`
+      : '文生图暂时没有可用接口。';
+  }
+  const hint = freeModels.poolSummary(pool).hint;
+  return `免费模型池里现在没有可用的源，出图接口保持置空（本次不使用付费模型）。${hint} `
+    + '想加更多免费源：把硅基流动/智谱/百炼/混元/魔搭的 key 填到设置项「免费额度平台 Key」，系统会自动探测并加入轮换。';
+}
+
+/**
+ * 依次尝试若干目标，第一个成功就返回。
+ * 免费源之间可以放心顺延：失败只浪费几十秒，不花钱。付费/手填源不自动重试。
+ */
+async function callTargets(targets, pool, buildRequest) {
+  let lastError = null;
+  for (const target of targets) {
+    // 免 key 源的匿名额度按张算：上次刚用过就等一小会儿再打，省得秒回 402
+    if (target.sourceId && target.sourceId !== 'manual') {
+      const wait = freeModels.slotWaitMs(pool, target.sourceId);
+      if (wait > 1500) {
+        log(`免费源「${target.sourceName}」的匿名额度还在恢复，等 ${Math.round(wait / 1000)} 秒再试`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+    try {
+      const { payload, retried } = await callWithRetry(target, buildRequest(target));
+      if (target.sourceId && target.sourceId !== 'manual') freeModels.markSuccess(pool, target.sourceId);
+      return { payload, retried, used: target };
+    } catch (error) {
+      lastError = error;
+      if (target.sourceId && target.sourceId !== 'manual') {
+        freeModels.markFailure(pool, target.sourceId, humanizeError(error));
+        warn(`免费源「${target.sourceName}」失败（${humanizeError(error)}），顺延下一个`);
+        continue;
+      }
+      break;   // 手填源失败就直接如实报出去，不重试也不换
+    }
+  }
+  throw lastError || new Error('没有可用接口');
 }
 
 /** 用户可能填 /v1 也可能填完整地址，这里统一补成 /images/generations。 */
@@ -340,6 +528,8 @@ async function requestImages(settings, body) {
   if (typeof apiFetch !== 'function') {
     throw new Error('联网能力不可用：清单需声明 permissions: ["web_fetch"]');
   }
+  // 非 OpenAI 协议的免费源走另一条适配器（形状/参数名/返回体都不同，硬套会错）
+  if (settings.kind === 'image-get') return requestImageGet(settings, body);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
   let res;
@@ -390,6 +580,89 @@ async function requestImages(settings, body) {
   const json = safeParse(text);
   if (!json || typeof json !== 'object') throw new Error(`接口返回的不是 JSON：${truncate(text, 200)}`);
   return json;
+}
+
+/**
+ * 「GET 直出图片」型免费源的适配器（Pollinations 这类）。
+ *
+ * 为什么必须单独一条路：它们的请求形状是 `GET {url}/{prompt}?width&height&model`，
+ * 返回的是**图片字节**而不是 JSON —— 参数名、鉴权、返回体三样都和 OpenAI 兼容层
+ * 不一样，硬套会错。
+ *
+ * 返回时故意转成 OpenAI 的 `{ data: [{ b64_json }] }` 形状：这样后面
+ * 下载/解码/校验/落盘/发送那条成熟链路一行都不用改。**不直接把字节传给下游**
+ * 是为了只保留一条解析路径 —— 将来 OpenAI 源那边改了返回形状，这条也不用跟着改。
+ */
+async function requestImageGet(settings, body) {
+  const [width, height] = parseSizePair(body.size, 1024);
+  const count = Math.max(1, Math.min(MAX_COUNT, Number(body.n) || 1));
+  // 免 key 的免费源正常 1~3 秒出图。给它 120 秒的超时毫无意义 —— 探测阶段早就
+  // 把"连不上"和"限流"分清了，这里再傻等两分钟只是让群友干等。
+  const timeoutMs = Math.min(settings.timeoutMs, KEYLESS_TIMEOUT_MS);
+  const out = [];
+  // 免 key 源的匿名额度按张算：一次要 4 张时必须一张一张慢慢来，否则第 2 张
+  // 就吃 402（整次调用前功尽弃）。要 key 的源不限流，不用等。
+  const gap = Number(settings.politeGapMs) || 0;
+  for (let i = 0; i < count; i += 1) {
+    if (i > 0 && gap > 0) {
+      await new Promise((r) => setTimeout(r, gap));
+    }
+    // 每张换 seed：免 key 的免费源按 prompt+seed 缓存，同 seed 会拿回同一张图
+    const seed = Math.floor(Math.random() * 1e9);
+    const url = `${String(settings.url || '').replace('{prompt}', encodeURIComponent(String(body.prompt || '')))}`
+      + `?width=${width}&height=${height}&model=${encodeURIComponent(settings.model)}&nologo=true&seed=${seed}`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+    let res;
+    try {
+      res = await apiFetch(url, { signal: controller.signal, redirect: 'follow' });
+    } catch (error) {
+      const spent = Math.round((Date.now() - startedAt) / 1000);
+      // 把真实耗时和底层原因都带上：一律报"超时（N 秒）"会掩盖"其实是边缘节点
+      // 5 秒就断了"这种信息（实测匿名额度用尽时，Cloudflare 会在十几秒内掐断）。
+      const tail = humanizeError(error);
+      if (controller.signal.aborted) {
+        // 免费源超时没有计费顾虑，但也不重试：直接顺延到池里下一个更快
+        throw new Error(`免费接口 ${spent} 秒没出图（上限 ${Math.round(timeoutMs / 1000)} 秒）：${tail}`);
+      }
+      throw new Error(`免费接口没出图（${spent} 秒）：${tail}`);
+    }
+
+    let buf;
+    try {
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const error = new Error(`免费接口返回 HTTP ${res.status}：${errorText(text)}`);
+        error.retryable = isTransientStatus(res.status, text);
+        throw error;
+      }
+      buf = Buffer.from(await res.arrayBuffer());
+    } finally {
+      // 读完（成功或失败）才清，别学上面那个 bug：清早了等于给读 body 摘掉超时
+      clearTimeout(timer);
+    }
+
+    if (buf.length < MIN_IMAGE_BYTES) {
+      throw new Error(`免费接口只回了 ${buf.length} 字节，不像图片（可能被限流成一句提示）`);
+    }
+    // 体积上限在这一层就先拦：免得一张超大图白白占满内存再进后面的解码
+    if (buf.length > settings.maxImageBytes) {
+      throw new Error(`图片 ${formatBytes(buf.length)} 超过上限 ${formatBytes(settings.maxImageBytes)}`);
+    }
+    out.push({ b64_json: buf.toString('base64') });
+  }
+  return { data: out };
+}
+
+/** "1024x1536" → [1024, 1536]；不认识就退回默认（别让用户填错就直接不出图）。 */
+function parseSizePair(size, fallback) {
+  const m = /^(\d{2,5})\s*[x*×]\s*(\d{2,5})$/i.exec(String(size || '').trim());
+  if (!m) return [fallback, fallback];
+  const w = Math.min(2048, Math.max(64, Number(m[1])));
+  const h = Math.min(2048, Math.max(64, Number(m[2])));
+  return [w, h];
 }
 
 /**
@@ -802,6 +1075,55 @@ function firstString(...values) {
 }
 function safeParse(text) {
   try { return JSON.parse(text); } catch { return null; }
+}
+
+// ── 给控制台设置页的免费池接口（路由白名单透传这两个钩子）──────────────────
+/**
+ * 免费池现状，给设置页渲染用。**不含任何 key 明文**
+ * （池子文件里也只存「key 该从哪取」，不存 key 本身）。
+ */
+export function freePoolStatus() {
+  const settings = readSettings();
+  const summary = freeModels.poolSummary();
+  return {
+    freeOnly: settings.freeOnly,
+    autoFree: settings.autoFree,
+    probeIntervalMin: settings.probeIntervalMin,
+    rotateFallback: settings.rotateFallback,
+    // 免 key 的源列出完整地址，需 key 的只列 baseUrl —— 前者本来就不是秘密
+    candidates: freeModels.FREE_SOURCES.map((s) => ({
+      id: s.id, name: s.name, provider: s.provider, model: s.model,
+      tier: s.tier, kind: s.kind, baseUrl: s.baseUrl || '', url: s.url || '',
+      keySlot: s.keySlot || '',
+      envKeys: s.envKeys || [], note: s.note || ''
+    })),
+    pool: summary
+  };
+}
+
+/** 「立即探测」：无视探测间隔强制重探一遍，然后回报池子现状。 */
+export async function refreshFreePool() {
+  const settings = readSettings();
+  const started = Date.now();
+  const result = await freeModels.discoverFree({
+    fetch: apiFetch, settings, minIntervalMs: 0, force: true
+  });
+  const summary = freeModels.poolSummary(result.pool);
+  return {
+    probed: result.probed, reused: result.reused, ms: Date.now() - started,
+    available: summary.available, pool: summary
+  };
+}
+
+/**
+ * 清空免费池（设置页的「清空」按钮）。
+ * 语义要说清楚：**清空 ≠ 停用**。池子删掉后，开着「自动探测」的话下次出图会立刻
+ * 重新探测一遍；想"彻底别用免费模型"应该去关「只用免费模型」或关技能开关。
+ */
+export function clearFreePool() {
+  const pool = freeModels.clearPool();
+  log('免费模型池已清空（下次出图或点「立即探测」会重新探测一遍）');
+  return { available: 0, pool: freeModels.poolSummary(pool) };
 }
 
 // 给测试用的出口

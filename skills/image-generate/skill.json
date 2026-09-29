@@ -1,7 +1,7 @@
 {
   "id": "image-generate",
   "name": "文生图",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "apiVersion": 1,
   "category": "media",
   "description": "用任意 OpenAI 兼容的图片生成接口（Base URL / API Key / 模型 id 全部自填）把自然语言描述画成图片，并直接发到当前群或私聊。",
@@ -12,6 +12,11 @@
   ],
   "requires": [],
   "settings": {
+    "freeOnly": true,
+    "autoFree": true,
+    "probeIntervalMin": 60,
+    "rotateFallback": 2,
+    "freeKeys": "",
     "baseUrl": "",
     "apiKey": "",
     "model": "",
@@ -24,21 +29,59 @@
     "maxImageMB": 8
   },
   "configSchema": {
+    "freeOnly": {
+      "type": "boolean",
+      "group": "免费模型自动探测",
+      "label": "只用免费模型",
+      "description": "默认开启（强烈建议别关）。出图前自动探测哪些免费模型真的能出图，通过的按顺序轮换使用；探测不到就保持置空并直接拒绝出图，绝不偷偷用下面手填的付费接口。"
+    },
+    "autoFree": {
+      "type": "boolean",
+      "group": "免费模型自动探测",
+      "label": "自动探测",
+      "description": "按下面的间隔自动重新探测。免 key 的源每次都探（很快、也不花钱），要花额度的源 24 小时才复探一次，免得白烧免费额度。"
+    },
+    "probeIntervalMin": {
+      "type": "number",
+      "group": "免费模型自动探测",
+      "label": "探测间隔（分钟）",
+      "min": 5,
+      "max": 1440,
+      "step": 5,
+      "description": "默认 60。两次探测之间至少隔这么久，出图时直接用池子里的结果，不重复联网。"
+    },
+    "rotateFallback": {
+      "type": "number",
+      "group": "免费模型自动探测",
+      "label": "失败时顺延几个",
+      "min": 0,
+      "max": 5,
+      "step": 1,
+      "description": "默认 2。一次出图最多试 1+2=3 个免费源（按轮换顺序），某个抽风就换下一个。免费源失败只浪费时间不花钱，所以放心顺延。失败的源会冷却 5~60 分钟自动跳过。"
+    },
+    "freeKeys": {
+      "type": "string",
+      "group": "免费模型自动探测",
+      "label": "免费档平台的 Key（JSON）",
+      "secret": true,
+      "description": "免 key 的源（Pollinations）不用填，这里只用来解锁更多免费档平台、让轮换有得选。填成 JSON：{\"siliconflow\":\"sk-xxx\",\"zhipu\":\"...\",\"dashscope\":\"...\",\"hunyuan\":\"...\",\"modelscope\":\"...\"}。程序不会替你注册账号，key 只能你自己提供。也可用环境变量 SILICONFLOW_API_KEY / ZHIPUAI_API_KEY / DASHSCOPE_API_KEY / HUNYUAN_API_KEY / MODELSCOPE_API_KEY。留空=不修改（要清空请填 {}）。"
+    },
     "baseUrl": {
       "type": "string",
+      "group": "手填接口（关闭「只用免费模型」后才生效）",
       "label": "接口 Base URL",
-      "description": "图片生成接口地址。填到 /v1 为止即可（如 https://api.openai.com/v1），会自动补 /images/generations；也可以直接填完整地址（.../v1/images/generations）。中转站地址同样填这里。"
+      "description": "图片生成接口地址。填到 /v1 为止即可（如 https://api.openai.com/v1），会自动补 /images/generations；也可以直接填完整地址（.../v1/images/generations）。中转站地址同样填这里。只在关闭「只用免费模型」时才会被用到 —— 开着的时候系统只用上面自动探测到的免费模型，避免误用付费接口。"
     },
     "apiKey": {
       "type": "string",
       "label": "API Key",
-      "description": "以 Authorization: Bearer 的方式发送。官方 key 或中转站 key 都填这里。",
+      "description": "以 Authorization: Bearer 的方式发送。官方 key 或中转站 key 都填这里。免费模型自动探测完全不需要这个字段（免 key 的源就是没有 key）。",
       "secret": true
     },
     "model": {
       "type": "string",
       "label": "模型 id",
-      "description": "如 gpt-image-1、dall-e-3，或中转站自定义的模型名（如 gpt-image-2、gpt-image-2.5-sunburst）。OpenAI 的 images 接口要求必填。注意两端不要留空格。"
+      "description": "如 gpt-image-1、dall-e-3，或中转站自定义的模型名（如 gpt-image-2、gpt-image-2.5-sunburst）。OpenAI 的 images 接口要求必填。注意两端不要留空格。下方「模型清单」可直接点选填入，免费模型已置顶。开着「只用免费模型」时这个字段不参与出图（由系统自动选免费模型）。"
     },
     "defaultSize": {
       "type": "string",
@@ -84,5 +127,237 @@
   "permissions": [
     "web_fetch"
   ],
-  "prompt": null
+  "prompt": null,
+  "modelsCatalog": [
+    {
+      "id": "flux",
+      "name": "FLUX（免 key）",
+      "provider": "Pollinations",
+      "url": "https://pollinations.ai",
+      "free": true,
+      "note": "公开免费层，免注册免 key，打开就能用。系统自动探测它，出图走它不需要任何配置。",
+      "keywords": [
+        "pollinations",
+        "免key",
+        "flux",
+        "免费"
+      ]
+    },
+    {
+      "id": "black-forest-labs/FLUX.1-schnell",
+      "name": "FLUX.1-schnell",
+      "provider": "硅基流动 SiliconFlow",
+      "url": "https://api-docs.siliconflow.cn/docs/userguide/capabilities/images",
+      "free": true,
+      "cheap": true,
+      "note": "1~4 步快速出图，硅基流动基本免费（约 $0.0014/张）。OpenAI 兼容：https://api.siliconflow.cn/v1",
+      "keywords": [
+        "siliconflow",
+        "硅基流动",
+        "flux"
+      ]
+    },
+    {
+      "id": "Kwai-Kolors/Kolors",
+      "name": "Kolors（可图）",
+      "provider": "硅基流动 SiliconFlow",
+      "url": "https://api-docs.siliconflow.cn/docs/userguide/capabilities/images",
+      "free": true,
+      "cheap": true,
+      "note": "快手可图，中文提示友好，硅基流动免费档。OpenAI 兼容：https://api.siliconflow.cn/v1",
+      "keywords": [
+        "siliconflow",
+        "硅基流动",
+        "kolors",
+        "可图"
+      ]
+    },
+    {
+      "id": "@cf/black-forest-labs/flux-1-schnell",
+      "name": "FLUX.1-schnell",
+      "provider": "Cloudflare Workers AI",
+      "url": "https://developers.cloudflare.com/workers-ai/models/text-to-image/",
+      "free": true,
+      "cheap": true,
+      "note": "Cloudflare Workers AI 免费层（每日有限额）；原生接口非 OpenAI 格式，经中转站/网关透出时可直接用这个 id",
+      "keywords": [
+        "cloudflare",
+        "workers"
+      ]
+    },
+    {
+      "id": "imagen-3.0-generate-002",
+      "name": "Imagen 3",
+      "provider": "Google Gemini API",
+      "url": "https://ai.google.dev/gemini-api/docs/image-generation",
+      "free": true,
+      "cheap": false,
+      "note": "Gemini API 免费层含 Imagen，Key 在 https://aistudio.google.com 领取",
+      "keywords": [
+        "google",
+        "gemini",
+        "imagen"
+      ]
+    },
+    {
+      "id": "black-forest-labs/FLUX.1-dev",
+      "name": "FLUX.1-dev",
+      "provider": "硅基流动 SiliconFlow",
+      "url": "https://api-docs.siliconflow.cn/docs/userguide/capabilities/images",
+      "free": false,
+      "cheap": true,
+      "note": "FLUX.1 完整版，质量更高，约 $0.014/张",
+      "keywords": [
+        "siliconflow",
+        "硅基流动",
+        "flux"
+      ]
+    },
+    {
+      "id": "black-forest-labs/FLUX.1-Kontext-dev",
+      "name": "FLUX.1-Kontext-dev",
+      "provider": "硅基流动 SiliconFlow",
+      "url": "https://api-docs.siliconflow.cn/docs/userguide/capabilities/images",
+      "free": false,
+      "cheap": true,
+      "note": "支持参考图/多图拼接理解",
+      "keywords": [
+        "siliconflow",
+        "硅基流动",
+        "flux"
+      ]
+    },
+    {
+      "id": "qwen-image",
+      "name": "Qwen-Image",
+      "provider": "阿里云百炼（通义）",
+      "url": "https://help.aliyun.com/zh/model-studio/image-generation-api",
+      "free": false,
+      "cheap": true,
+      "note": "通义千问图片模型，百炼新用户常有免费额度/低价活动",
+      "keywords": [
+        "alibaba",
+        "阿里",
+        "百炼",
+        "qwen",
+        "通义"
+      ]
+    },
+    {
+      "id": "cogview-4",
+      "name": "CogView-4",
+      "provider": "智谱 AI",
+      "url": "https://open.bigmodel.cn/dev/howuse/cogview",
+      "free": false,
+      "cheap": true,
+      "note": "GLM 系文生图，智谱开放平台，注册送额度",
+      "keywords": [
+        "zhipu",
+        "智谱",
+        "glm",
+        "cogview"
+      ]
+    },
+    {
+      "id": "hunyuan-image",
+      "name": "混元文生图",
+      "provider": "腾讯云",
+      "url": "https://cloud.tencent.com/document/product/1729",
+      "free": false,
+      "cheap": true,
+      "note": "腾讯混元生图 API",
+      "keywords": [
+        "tencent",
+        "腾讯",
+        "混元",
+        "hunyuan"
+      ]
+    },
+    {
+      "id": "gpt-image-2",
+      "name": "GPT Image 2",
+      "provider": "OpenAI",
+      "url": "https://platform.openai.com/docs/guides/image-generation",
+      "free": false,
+      "cheap": false,
+      "note": "现役旗舰图片模型，支持透明背景、任意分辨率；中转站自定义名常为 gpt-image-2.5-sunburst",
+      "keywords": [
+        "openai",
+        "chatgpt",
+        "gpt"
+      ]
+    },
+    {
+      "id": "gpt-image-1.5",
+      "name": "GPT Image 1.5",
+      "provider": "OpenAI",
+      "url": "https://platform.openai.com/docs/guides/image-generation",
+      "free": false,
+      "cheap": false,
+      "note": "GPT 图片系列中端型号",
+      "keywords": [
+        "openai",
+        "chatgpt",
+        "gpt"
+      ]
+    },
+    {
+      "id": "gpt-image-1-mini",
+      "name": "GPT Image 1 mini",
+      "provider": "OpenAI",
+      "url": "https://platform.openai.com/docs/guides/image-generation",
+      "free": false,
+      "cheap": true,
+      "note": "便宜档，适合批量常规出图",
+      "keywords": [
+        "openai",
+        "chatgpt",
+        "gpt"
+      ]
+    },
+    {
+      "id": "gpt-image-1",
+      "name": "GPT Image 1",
+      "provider": "OpenAI",
+      "url": "https://platform.openai.com/docs/guides/image-generation",
+      "free": false,
+      "cheap": false,
+      "note": "OpenAI 图片系列前代",
+      "keywords": [
+        "openai",
+        "chatgpt",
+        "gpt"
+      ]
+    },
+    {
+      "id": "dall-e-3",
+      "name": "DALL·E 3",
+      "provider": "OpenAI",
+      "url": "https://platform.openai.com/docs/guides/image-generation",
+      "free": false,
+      "cheap": false,
+      "note": "经典模型，兼容性最广",
+      "keywords": [
+        "openai",
+        "chatgpt",
+        "dall"
+      ]
+    },
+    {
+      "id": "wanx2.1-t2i-turbo",
+      "name": "通义万相 2.1",
+      "provider": "阿里云百炼",
+      "url": "https://help.aliyun.com/zh/model-studio/wanx",
+      "free": false,
+      "cheap": true,
+      "note": "阿里通义万相快速版",
+      "keywords": [
+        "alibaba",
+        "阿里",
+        "百炼",
+        "wanx",
+        "通义"
+      ]
+    }
+  ]
 }

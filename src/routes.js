@@ -1208,6 +1208,100 @@ export function createRoutes(deps) {
       }
     },
     {
+      // 免费额度情报（api-deals）：给 UI 渲染"最新免费/低价模型"用。
+      // 数据文件由 skills/AI额度情报 写入（默认凌晨 4 点刷新；没开这个技能或还没
+      // 刷新过时返回空清单，UI 据此提示开启）。只读，不放任何密钥。
+      method: 'GET', pattern: '/api/deals',
+      handler: async ({ res, json }) => {
+        let store = { items: [], lastRefresh: 0, lastError: '' };
+        try {
+          const file = path.join(DATA_DIR, 'api-deals.json');
+          if (fs.existsSync(file)) {
+            const t = fs.readFileSync(file, 'utf8');
+            const parsed = JSON.parse(t.charCodeAt(0) === 0xFEFF ? t.slice(1) : t);
+            if (Array.isArray(parsed?.items)) store = parsed;
+          }
+        } catch {
+          // 读取失败当作空清单，UI 会给"尚未有数据"提示而不是整页报错
+        }
+        store.items = (store.items || []).slice(0, 60);
+        // 与技能页同一口径：没配置过时按 enabledByDefault 判定（api-deals 默认关闭）
+        const dealsEnabled = skillManager.isEnabled('api-deals');
+        return json(res, 200, { ok: true, enabled: dealsEnabled, ...store });
+      }
+    },
+    {
+      // 手动刷新免费额度情报：无视"整点才刷"的定时限制，立刻抓一轮
+      // （skills/AI额度情报 暴露 manualRefresh；技能没加载/没开时返回错误信息让 UI 提示）。
+      method: 'POST', pattern: '/api/deals/refresh',
+      handler: async ({ res, json }) => {
+        const mod = skillManager.registry.get('api-deals');
+        if (!mod || typeof mod.manualRefresh !== 'function') {
+          return json(res, 200, { ok: false, error: '「AI免费额度情报」技能未加载或未开启' });
+        }
+        try {
+          const count = await mod.manualRefresh();
+          return json(res, 200, { ok: true, count: Number(count) || 0 });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e?.message ?? String(e) });
+        }
+      }
+    },
+    {
+      // 「免费模型自动探测」扩展点：读免费池现状（设置页打开弹窗时拉一次）。
+      // 只有实现了该扩展点的技能（如 image-generate）才有内容，其它技能如实回
+      // "没有这个能力"——UI 据此决定要不要渲染这一块，路由不认技能 id 硬编码。
+      method: 'GET', pattern: /^\/api\/skills\/([^/]+)\/free-models$/,
+      handler: async ({ res, json, match }) => {
+        const id = decodeURIComponent(match[1]);
+        const mod = skillManager.registry.get(id);
+        if (!mod) return json(res, 404, { ok: false, error: `模块不存在：${id}` });
+        if (typeof mod.freePoolStatus !== 'function') {
+          return json(res, 200, { ok: false, error: '该模块没有「免费模型自动探测」能力' });
+        }
+        try {
+          return json(res, 200, { ok: true, id, ...(mod.freePoolStatus() || {}) });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e?.message ?? String(e) });
+        }
+      }
+    },
+    {
+      // 「立即探测」：无视探测间隔强制重探一遍免费模型（真的出图验证，不是查文档）。
+      method: 'POST', pattern: /^\/api\/skills\/([^/]+)\/free-models\/refresh$/,
+      handler: async ({ res, json, match }) => {
+        const id = decodeURIComponent(match[1]);
+        const mod = skillManager.registry.get(id);
+        if (!mod) return json(res, 404, { ok: false, error: `模块不存在：${id}` });
+        if (typeof mod.refreshFreePool !== 'function') {
+          return json(res, 200, { ok: false, error: '该模块没有「免费模型自动探测」能力' });
+        }
+        try {
+          return json(res, 200, { ok: true, id, ...(await mod.refreshFreePool()) });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e?.message ?? String(e) });
+        }
+      }
+    },
+    {
+      // 清空免费池（设置页的「清空」按钮）。⚠️ 语义是"删缓存"不是"停用"：
+      // 开着「自动探测」的话下次出图会重新探测 —— 路由返回里带 pool 让 UI 立刻刷新。
+      method: 'POST', pattern: /^\/api\/skills\/([^/]+)\/free-models\/clear$/,
+      handler: async ({ res, json, match }) => {
+        const id = decodeURIComponent(match[1]);
+        const mod = skillManager.registry.get(id);
+        if (!mod) return json(res, 404, { ok: false, error: `模块不存在：${id}` });
+        if (typeof mod.clearFreePool !== 'function') {
+          return json(res, 200, { ok: false, error: '该模块没有「免费模型自动探测」能力' });
+        }
+        try {
+          return json(res, 200, { ok: true, id, ...(mod.clearFreePool() || {}) });
+        } catch (e) {
+          return json(res, 200, { ok: false, error: e?.message ?? String(e) });
+        }
+      }
+    },
+    {
       // 开关配置总览：给设置页渲染"技能"区块
       method: 'GET', pattern: '/api/skills/capabilities',
       handler: async ({ res, json }) => {
