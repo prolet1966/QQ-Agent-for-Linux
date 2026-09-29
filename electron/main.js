@@ -70,14 +70,18 @@ app.disableHardwareAcceleration();
 //
 // 真正的因果：下面这段历史上为了绕开 R44（沙箱化 GPU 进程被系统安全策略拦杀 →
 // Chromium 判定 "GPU process isn't usable. Goodbye." → 整个应用自杀）而全局关掉了
-// 沙箱。R70 的 --disable-gpu 已经让 GPU 进程不再被拦杀，这条理由随之失效，而关沙箱
-// 的副作用留下来：Chromium 130 在无沙箱下拿不到共享内存 → 每个渲染进程刚 fork 出来
-// 还没画第一帧就 FATAL 自杀 → 内核记 trap invalid opcode → 窗口每 27 秒重建。
+// 沙箱。关沙箱的副作用留下来：Chromium 130 在无沙箱下拿不到共享内存 → 每个渲染
+// 进程刚 fork 出来还没画第一帧就 FATAL 自杀 → 内核记 trap invalid opcode →
+// 窗口每 27 秒重建。
 //
 // 验证（3510 测试实例，与主账号隔离）：把沙箱恢复、其余开关不动，连续监控 5 分钟
 // = 11 个崩溃周期，崩溃计数 0 增长，渲染进程稳定存活，HTTP 全程 200。同一次启动里
-// GPU 进程也健康存活 6 分钟、无 "isn't usable" 自杀签名，说明 R44 那条链确实已经
-// 被 --disable-gpu 掐断，恢复沙箱是安全的。
+// GPU 进程也健康存活 6 分钟、无 "isn't usable" 自杀签名。
+//
+// 2026-09-29 补注：当时认为恢复沙箱的安全性靠 R70 的 `--disable-gpu` 兜底，这个
+// 归因已被实验推翻并重写（见下方 R70）——`--disable-gpu` 反而会加速 Goodbye，
+// 真正的兜底是 Chromium 自己的 GPU 故障回退（实测连杀 5 次 GPU 进程应用照活）。
+// 沙箱保持开启的结论不变，只是依据换成了后者。
 //
 // 本项目界面只从 127.0.0.1 本机服务加载、CSP 锁死自身脚本、不渲染不可信网页，
 // 沙箱开着没有额外暴露面。诊断用回退（**别在生产长期开**）：QQ_AGENT_NO_SANDBOX=1
@@ -86,23 +90,31 @@ if (String(process.env.QQ_AGENT_NO_SANDBOX ?? '').trim() === '1') {
   app.commandLine.appendSwitch('no-sandbox');
 }
 
-// R70：彻底不拉 GPU 进程，从源头掐断 R44 那条致命链。
+// R70（2026-09-29 重写）：**不要**加 `--disable-gpu`。它对本要防的 R44 致命链
+// 起反作用，这里留档实验证据。
 //
-// R44 记下的死法是：GPU 进程被本机安全策略杀掉 → Chromium 重试 6 次 →
+// R44 记下的死法是：GPU 进程被本机安全策略杀掉 → Chromium 重试数次 →
 // 判定 "GPU process isn't usable. Goodbye." → **整个进程自杀**（不是某个功能失效，
-// 是应用凭空消失）。上面那句 `disableHardwareAcceleration()` 只把渲染换成软件实现，
-// **GPU 进程照样会被创建**（走 SwiftShader），所以它挡不住这条链——这也是为什么
-// 2026-09-22 加上 no-sandbox 之后，安装版 0.4.1 仍然在 22:17:17 启动、22:17:20 崩
-// （0xC0000005，存活 3 秒）。
+// 是应用凭空消失）。2026-09-22 安装版 0.4.1 在 22:17:17 启动、22:17:20 崩
+// （0xC0000005，存活 3 秒）就是这条链。
 //
-// `--disable-gpu` 直接不建 GPU 进程：没有 GPU 进程，就没有"GPU 进程被杀"这条
-// 致命路径。代价是所有绘制走 CPU 光栅化 —— 本应用的窗口只是个控制台页面，
-// 没有 canvas/WebGL 诉求，实测无差别。
-// `--disable-software-rasterizer` 顺手关掉用不上的 SwiftShader 后端，少一个
-// 会被误伤的子进程。
-// 一键回退：万一哪台机器上这个开关造成了渲染异常（而不是它要修的那种崩溃），
-// 设置环境变量 QQ_AGENT_ENABLE_GPU=1 即可恢复原来的行为，不必改代码重新打包。
-if (String(process.env.QQ_AGENT_ENABLE_GPU ?? '').trim() !== '1') {
+// 当初加 `--disable-gpu` 的理由是"直接不建 GPU 进程，就没有 GPU 进程可杀"。
+// 实测（Electron 33.2.0 / Chrome 130，最小复现工程 + WebGL 强制拉 GPU）三点全否：
+//   1. GPU 进程照样创建 —— 不加开关 / appendSwitch / 命令行直传，三组都拉起
+//      GPU 进程。Chrome 130 里 GPU 进程还托管 Viz 合成器，`--disable-gpu` 只关
+//      GL 加速，关不掉进程本身。
+//   2. 更糟的是它让 R44 链更容易触发：连杀 GPU 进程，**不加开关**的一组 Chromium
+//      全部容忍（ContextResult::kTransientFailure 后回退软件路径，应用活到正常
+//      退出）；**加了开关**的一组第 3 次就 FATAL:
+//      gpu_data_manager_impl_private.cc(423)] GPU process isn't usable. Goodbye.
+//      → SIGTRAP 自杀。也就是说这个开关把"可恢复的 GPU 进程死亡"升级成
+//      "应用级致命"，与初衷完全相反。
+//   3. 生产侧旁证：撤掉开关后两个实例的 GPU 进程（沙箱内）长期健康存活，
+//      渲染进程 0 崩溃。
+//
+// 结论：默认什么都不加，让 Chromium 自己走 GPU 故障回退。诊断需要复现旧行为时
+// 设 QQ_AGENT_DISABLE_GPU=1（**别在生产长期开**，理由如上）。
+if (String(process.env.QQ_AGENT_DISABLE_GPU ?? '').trim() === '1') {
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-software-rasterizer');
 }
