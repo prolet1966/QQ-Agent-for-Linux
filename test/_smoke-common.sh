@@ -344,26 +344,33 @@ smoke_app_checks() {
            "http://127.0.0.1:$SMOKE_CONSOLE_PORT/api/snowluma/launch" 2>/dev/null || echo 000)"
   smoke_info "POST /api/snowluma/launch" "HTTP $lcode（触发 snowlumaDir()）"
 
-  if [ -d "$MIRROR" ]; then
-    smoke_pass "镜像目录已创建" "$MIRROR"
+  local SL_DIR="$PREFIX/resources/app/snowluma"
+  if [ -w "$SL_DIR" ]; then
+    # AppImage + extract-and-run / 开发树：解到可写处，应用**就地运行**（这是正确行为）。
+    # 镜像只在安装目录不可写时才需要，此时不该要求 native/ 是软链。
+    smoke_info "SnowLuma 就地运行（无需镜像）" "安装目录可写：$SL_DIR（如 AppImage 的 extract-and-run）"
   else
-    smoke_fail "镜像目录未创建" "$MIRROR 不存在 —— snowlumaDir() 可能没走 Linux 分支"
-  fi
-  if [ -L "$MIRROR/native" ]; then
-    smoke_pass "镜像里 native/ 是符号链接" "→ $(readlink "$MIRROR/native")"
-  else
-    smoke_fail "镜像里 native/ 不是符号链接" "静态件应当软链回只读安装目录"
-  fi
-  if [ -L "$MIRROR/config" ] || [ -L "$MIRROR/data" ]; then
-    smoke_fail "★ config/ 或 data/ 被软链了" "它们必须留给 SnowLuma 在镜像里自建，否则又写回只读目录"
-  else
-    smoke_pass "config/ data/ 未被软链" "将由 SnowLuma 在镜像内自行创建"
-  fi
-  # 反向验证：SnowLuma 的安装目录里不该被写出 config/
-  if [ -e "$PREFIX/resources/app/snowluma/config" ]; then
-    smoke_fail "★ 安装目录里出现了 snowluma/config" "写入跑回 /opt 了，镜像机制失效"
-  else
-    smoke_pass "安装目录内无 snowluma/config" "写入确实被重定向了"
+    if [ -d "$MIRROR" ]; then
+      smoke_pass "镜像目录已创建" "$MIRROR"
+    else
+      smoke_fail "镜像目录未创建" "$MIRROR 不存在 —— snowlumaDir() 可能没走 Linux 分支"
+    fi
+    if [ -L "$MIRROR/native" ]; then
+      smoke_pass "镜像里 native/ 是符号链接" "→ $(readlink "$MIRROR/native")"
+    else
+      smoke_fail "镜像里 native/ 不是符号链接" "静态件应当软链回只读安装目录"
+    fi
+    if [ -L "$MIRROR/config" ] || [ -L "$MIRROR/data" ]; then
+      smoke_fail "★ config/ 或 data/ 被软链了" "它们必须留给 SnowLuma 在镜像里自建，否则又写回只读目录"
+    else
+      smoke_pass "config/ data/ 未被软链" "将由 SnowLuma 在镜像内自行创建"
+    fi
+    # 反向验证：SnowLuma 的安装目录里不该被写出 config/
+    if [ -e "$SL_DIR/config" ]; then
+      smoke_fail "★ 安装目录里出现了 snowluma/config" "写入跑回 /opt 了，镜像机制失效"
+    else
+      smoke_pass "安装目录内无 snowluma/config" "写入确实被重定向了"
+    fi
   fi
 
   smoke_head "日志健康检查"
