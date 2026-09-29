@@ -103,13 +103,13 @@ export function setup(api) {
   api.registerTool({
     id: 'draw',                      // 注册后实际是 image-generate__draw
     name: '生成图片',
-    description: '文生图：把一段画面描述渲染成图片，并直接发到当前会话。当群友说「画一张…」「帮我画个…」「生成一张…的图」「来张…的图」时用它。prompt 要写清主体 + 风格 + 构图/色调；多个画面用 count。图片由本工具直接发出，不需要再调发送工具。',
+    description: '文生图：把一段画面描述渲染成图片，并直接发到当前会话。当群友说「画一张…」「帮我画个…」「生成一张…的图」「来张…的图」时用它。⚠️ prompt 必须用**英文**写（免费出图模型对英文的服从度远高于中文；中文描述常画成风马牛不相及的东西）：先把群友的中文意图翻成英文，再写清主体 + 风格 + 构图/色调；多个画面用 count。图片由本工具直接发出，不需要再调发送工具。',
     category: 'media',
     icon: '🎨',
     parameters: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', description: '画面描述（中英文都可以）：主体、风格、构图、色调' },
+        prompt: { type: 'string', description: '画面描述，必须用英文（把用户的中文意图翻成英文）：主体、风格、构图、色调' },
         size: { type: 'string', description: '可选：输出尺寸，如 1024x1024 / 1024x1536 / 512x512；留空用设置里的默认尺寸' },
         count: { type: 'number', description: '可选：一次生成几张，1~4，默认 1' }
       },
@@ -313,7 +313,8 @@ export function promptSections() {
     id: 'image-generate-note',
     title: '文生图',
     priority: 35,
-    content: '群友让你画图/生成图片时，用 draw 工具（prompt 写清画面，多张用 count），它会把图直接发到当前会话。'
+    content: '群友让你画图/生成图片时，用 draw 工具。⚠️ prompt 一律用**英文**写（免费出图模型对英文服从度高得多，中文常画不对）：把群友的中文意图翻成英文，再补主体 + 风格 + 构图/色调，多张用 count。'
+      + '它会把图直接发到当前会话。'
       + '你看不到生成结果，所以不要描述画面细节，也不要再调发图工具。'
       + '接口在免费模型之间自动轮换：某个源失败会自动换下一个，你不用重试；发不出去时更不要重新生成。'
   }];
