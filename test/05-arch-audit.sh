@@ -153,7 +153,16 @@ for rel in resources/app/package.json \
 done
 
 # 补丁是否真的打上了（漏打补丁的包在 Linux 上必坏）
-if [ -f "$ROOT/resources/app/src/app.js" ]; then
+#
+# ⚠️ 2026-09-29：这条判据**只对「Windows 源 + 补丁」那条产物线成立**。
+#    本仓库已经自带 Linux 适配（数据目录走 XDG、SnowLuma 不可写时启用可写镜像），
+#    它不经过 patch-linux.mjs，自然也没有 QQA_LINUX_PATCH 标记。
+#    用 --no-patch 直接从本仓库组装时（QL_NO_PATCH=1），跳过这两条断言 ——
+#    对应功能改由冒烟测试实测（数据目录落点 / SnowLuma 镜像与 native 软链）。
+if [ "${QL_NO_PATCH:-0}" = "1" ]; then
+  echo "  · 跳过补丁标记断言（QL_NO_PATCH=1：直接使用自带 Linux 适配的仓库代码）"
+  echo "    功能由冒烟测试实测：数据目录落 XDG / SnowLuma 不可写时建可写镜像"
+elif [ -f "$ROOT/resources/app/src/app.js" ]; then
   if grep -q 'QQA_LINUX_PATCH:snowluma-runtime-mirror' "$ROOT/resources/app/src/app.js"; then
     ok "snowluma-runtime-mirror 补丁已应用"
   else

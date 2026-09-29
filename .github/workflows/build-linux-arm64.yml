@@ -126,6 +126,8 @@ jobs:
         run: bash scripts/03-stage.sh --arch arm64 --no-patch --app-src ci-app
 
       - name: 架构审计（x86_64 / PE 混入 / world-writable 即失败）
+        env:
+          QL_NO_PATCH: '1'   # 直接从仓库组装（--no-patch），补丁标记断言不适用
         run: bash test/05-arch-audit.sh --arch arm64
 
       - name: 打 deb 与 rpm

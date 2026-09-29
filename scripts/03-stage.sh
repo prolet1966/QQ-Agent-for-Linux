@@ -448,6 +448,8 @@ normalize_modes "$STAGE_ARCH_DIR"
 
 echo
 echo "===== 6. 架构审计 ====="
+# --no-patch（直接用自带 Linux 适配的仓库代码）时，补丁标记断言不适用
+[ "$DO_PATCH" = "0" ] && export QL_NO_PATCH=1
 if [ -x test/05-arch-audit.sh ]; then
   bash test/05-arch-audit.sh --arch "$ARCH" --root "$OPT" || die "架构审计未通过，产物不可用"
 else

@@ -136,16 +136,70 @@ export function createApp({ log = console.log } = {}) {
   const sseClients = new Set();
 
   // ── SnowLuma 程序目录与进程管理 ──
+  /** 目录是否可写：真写一个临时文件再删（access(W_OK) 在 root/ACL 下会撒谎）。 */
+  function isDirWritable(dir) {
+    try {
+      const probe = path.join(dir, `.qqa-write-${process.pid}-${Date.now()}`);
+      fs.writeFileSync(probe, '');
+      fs.unlinkSync(probe);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * SnowLuma 运行目录「可写镜像」（Linux 专用兜底）。
+   *
+   * 为什么需要：SnowLuma 会把 config/ data/ logs/ 写在自己所在目录旁边。正式安装
+   * （dpkg/rpm）把应用装到 root 属主的 /opt，那里只读 —— 直接跑会 EACCES，协议端起不来。
+   * 镜像做法：在用户可写的数据区建一个目录，只把**可变目录**（config/data/logs）建成
+   * 真实目录，其余静态件（index.mjs / node / client / native / *.js…）全部软链回只读安装目录。
+   *
+   * 只在安装目录**确实不可写**时才启用；开发/本地安装（可写）行为完全不变。
+   */
+  function ensureSnowlumaMirror(bundled, mirror) {
+    const mutable = ['config', 'data', 'logs'];
+    fs.mkdirSync(mirror, { recursive: true });
+    // 可变目录无条件建真实目录（官方包里未必带，SnowLuma 会往里写）
+    for (const name of mutable) {
+      try { fs.mkdirSync(path.join(mirror, name), { recursive: true }); } catch { /* 已存在 */ }
+    }
+    for (const name of fs.readdirSync(bundled)) {
+      const src = path.join(bundled, name);
+      const dst = path.join(mirror, name);
+      if (mutable.includes(name)) continue;
+      let exists = false;
+      try { fs.lstatSync(dst); exists = true; } catch { exists = false; }
+      if (exists) continue;   // 已建过（含用户已有）就不动
+      try { fs.symlinkSync(src, dst); } catch { /* 软链失败则跳过该条目 */ }
+    }
+    return mirror;
+  }
+
+  /** SnowLuma 的落盘目录（不可写时返回用户区的可写镜像，见 ensureSnowlumaMirror）。 */
   function snowlumaDir() {
     const configured = String(getConfig().snowluma?.dir || '').trim();
     if (configured) return configured;
-    const bundled = path.join(ROOT, 'snowluma');
-    if (fs.existsSync(bundled)) return bundled;
-    // 安装版：asar 里的文件不可执行，electron-builder 会把 snowluma/ 解包到
-    // resources/app.asar.unpacked/snowluma（见 package.json asarUnpack）
+    let bundled = path.join(ROOT, 'snowluma');
+    // ⚠️ 打包版（asar）必须优先用 app.asar.unpacked：asar 内的文件无法被 spawn，
+    //    而且对 asar 内的虚拟路径做软链，对外部进程（SnowLuma 的 node）毫无意义。
+    //    历史 bug：先 existsSync(asar 内路径) 会**恒为真**（Electron 的 fs 会虚拟化），
+    //    于是永远走不到 unpacked 分支。
     const unpacked = bundled.replace('app.asar', 'app.asar.unpacked');
-    if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
-    return '';
+    if (unpacked !== bundled && fs.existsSync(unpacked)) bundled = unpacked;
+    if (!fs.existsSync(bundled)) return '';
+    if (platform.isWindows) return bundled;
+    if (isDirWritable(bundled)) return bundled;   // 可写 → 原行为
+    const mirrorRoot = path.basename(DATA_DIR) === 'data' ? path.dirname(DATA_DIR) : DATA_DIR;
+    const mirror = path.join(mirrorRoot, 'snowluma');
+    try {
+      ensureSnowlumaMirror(bundled, mirror);
+      return mirror;
+    } catch (e) {
+      console.warn(`[snowluma] 可写镜像创建失败，回退只读目录：${e?.message ?? e}`);
+      return bundled;
+    }
   }
 
   /**
