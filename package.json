@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "js-yaml": "^5.4.1",
+    "mongodb": "^6.21.0",
     "undici": "^6.28.0",
     "ws": "^8.18.0"
   },
@@ -69,9 +70,24 @@
     ],
     "linux": {
       "target": [
-        { "target": "deb", "arch": ["x64"] },
-        { "target": "rpm", "arch": ["x64"] },
-        { "target": "AppImage", "arch": ["x64"] }
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Network",
       "icon": "assets/icon.png",
@@ -120,7 +136,12 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "assets/icon.ico",
       "artifactName": "qq-agent-v${version}-setup.${ext}"

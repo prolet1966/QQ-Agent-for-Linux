@@ -2,6 +2,7 @@
 // Electron 主进程与 headless 服务器都从这里启动。
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -253,6 +254,58 @@ export function createApp({ log = console.log } = {}) {
       socket.once('error', () => done(false));
       socket.connect(port, host);
     });
+  }
+
+  /**
+   * 本地 MongoDB 自举（知识库自增长 / 记忆自增长的候选入库、AutoApprove、TTL 过期
+   * 清理都依赖 Mongo）。桌面版原则：不向用户要 sudo、不装系统服务 —— 优先拉起
+   * <home>/.local/share/mongodb/bin/mongod（通用二进制，免编译，随数据目录落盘），
+   * dbpath 放在 <DATA_DIR>/mongodb/。软依赖：路径不存在 / 端口被占 / 拉起失败都
+   * 静默降级（kb-growth、memory-growth 本就支持无 Mongo 运行）；config.mongod 可关。
+   *
+   * 幂等：27017 已有 mongod 在监听就直接复用（另一个实例已拉起 / 用户自己装的）。
+   * 先起 Mongo 再加载插件 —— kb-growth 激活时首次探活就能连上，不用等重测。
+   */
+  async function ensureLocalMongod() {
+    try {
+      const cfg = getConfig()?.mongod || {};
+      if (cfg.autoStart === false) return null;
+      if (await isPortOpen('127.0.0.1', 27017, 500)) {
+        log('[mongod] 127.0.0.1:27017 已有 MongoDB 在跑，直接复用');
+        return { reused: true, port: 27017 };
+      }
+      const bin = String(cfg.bin || '').trim()
+        || path.join(os.homedir(), '.local', 'share', 'mongodb', 'bin', 'mongod');
+      if (!fs.existsSync(bin)) {
+        log(`[mongod] 未找到 ${bin}，跳过（知识库/记忆降级为纯本地模式）`);
+        return null;
+      }
+      const dbPath = path.join(DATA_DIR, 'mongodb');
+      fs.mkdirSync(dbPath, { recursive: true });
+      const proc = spawn(bin, [
+        '--dbpath', dbPath,
+        '--port', '27017',
+        '--bind_ip', '127.0.0.1',
+        '--logpath', path.join(dbPath, 'mongod.log'),
+        '--logappend',
+        '--setParameter', 'enableTestCommands=0'
+      ], { detached: true, stdio: 'ignore' });
+      proc.unref();
+      // 等它真的开始监听（最多 ~12s；冷启动首次要建初始库）。不等成功也不报错：
+      // 探活循环由 kb-growth 自己的后台探测兜底。
+      for (let i = 0; i < 24; i++) {
+        if (await isPortOpen('127.0.0.1', 27017, 500)) {
+          log(`[mongod] 本地 MongoDB 已启动（pid ${proc.pid}, dbpath ${dbPath}）`);
+          return { pid: proc.pid, port: 27017, dbPath };
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      log('[mongod] 等待监听超时（可查 ' + path.join(dbPath, 'mongod.log') + '），知识库降级纯本地');
+      return { pid: proc.pid, port: 27017, dbPath, slow: true };
+    } catch (error) {
+      log(`[mongod] 自举失败（软依赖，不阻塞启动）: ${error?.message ?? error}`);
+      return null;
+    }
   }
 
   // SnowLuma 内置控制台日志（环形缓冲，最近 500 行）
@@ -1600,8 +1653,12 @@ export function createApp({ log = console.log } = {}) {
     collectUsageRows({ range: '7' }).catch(() => {});
 
     // ── Skill 加载 与 SnowLuma 拉起并行（互不依赖）──
+    // 本地 MongoDB 也在这一棒拉起：kb-growth/memory-growth 的候选入库、AutoApprove、
+    // TTL 过期清理需要它。先起 Mongo 再加载插件，首次探活即可连上；起不来静默降级。
+    const mongoReady = ensureLocalMongod();
     const skillsReady = (async () => {
       try {
+        await mongoReady;
         const pluginResult = await reloadSkills({ reason: 'boot' });
         const okCount = pluginResult.loaded.length;
         const failCount = pluginResult.failed.length;

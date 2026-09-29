@@ -133,19 +133,7 @@ export async function activate(ctx) {
     },
   });
 
-  // 4) 后台 Worker（独立 tick，原子租约领取）
-  worker = new IngestWorker({
-    mongo: mongoHandle,
-    intervalMs: c.worker?.intervalMs ?? 1500,
-    batchSize: Number(c.workerBatchSize) || 4,
-    concurrency: c.worker?.concurrency ?? 2,
-    leaseMs: c.worker?.leaseMs ?? 60_000,
-    audit: auditLogger,
-  });
-  await worker.start();
-  api.log?.('kb-growth: 后台 Worker 已启动（tick ' + (c.worker?.intervalMs ?? 1500) + 'ms）');
-
-  // 5) 语义向量服务探活（软依赖）
+  // 4) 语义词向量探活（软依赖；worker 晋升分块时要给向量，语义挂了自动退回哈希）
   if (c.semanticEmbedEnabled !== false) {
     embedder = new Embedder({
       provider: 'local-hash',   // 默认哈希，语义可用时升级
@@ -156,6 +144,21 @@ export async function activate(ctx) {
     scheduleSemanticProbe();
     api.log?.('kb-growth: 语义向量服务 ' + (semanticProbeState.ok ? '已连接' : '不可用 → 退回哈希向量（' + semanticProbeState.reason + '）'));
   }
+
+  // 5) 后台 Worker（独立 tick，原子租约领取；含索引建立 + AutoApprove 晋升 + 租约回收）
+  worker = new IngestWorker({
+    mongo: mongoHandle,
+    intervalMs: c.worker?.intervalMs ?? 1500,
+    batchSize: Number(c.workerBatchSize) || 4,
+    concurrency: c.worker?.concurrency ?? 2,
+    leaseMs: c.worker?.leaseMs ?? 60_000,
+    promoteEveryMs: Number(c.promoteEveryMs) || 30_000,
+    audit: auditLogger,
+    config: cfg,
+    embedder,
+  });
+  await worker.start();
+  api.log?.('kb-growth: 后台 Worker 已启动（tick ' + (c.worker?.intervalMs ?? 1500) + 'ms，晋升每 ' + (Number(c.promoteEveryMs) || 30_000) + 'ms）');
 }
 
 export async function deactivate(ctx) {
