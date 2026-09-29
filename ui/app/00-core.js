@@ -64,9 +64,13 @@ function applyPeakPreset(key) {
   // 档位点走自定义竖向滑条控制器（activeVSlider 在活跃设置弹窗打开时挂上）。
   // 高峰珠（档位低）与低谷珠（档位高）各就各位；applyValues 会触发一次
   // onChange 把值写进弹窗草稿 —— 刻度/区间带/说明文字随之刷新。
-  const hi = Math.min(Number(p.peak.sliderPos) || 0, Number(p.valley?.sliderPos ?? 100) || 100);
-  const lo = Math.max(Number(p.peak.sliderPos) || 0, Number(p.valley?.sliderPos ?? 100) || 100);
-  activeVSlider?.applyValues(lo, hi);
+  // 2026-09-29：珠子独立，直接按语义装值（低谷值 / 高峰值），不再排序钳位。
+  const lo = Number(p.valley?.sliderPos ?? 100);   // 低谷档位值（可能低于高峰值）
+  const hi = Number(p.peak?.sliderPos ?? 10);      // 高峰档位值
+  activeVSlider?.applyValues(
+    Math.min(100, Math.max(0, lo)),
+    Math.min(100, Math.max(0, hi))
+  );
   const hint = $('#peak-preset-hint');
   if (hint) hint.textContent = key === 'custom' ? '已套用「自定义」。可继续微调，保存后生效。' : `已套用「${PEAK_PRESETS[key].label}」。可继续微调，保存后生效。`;
 }
@@ -78,7 +82,7 @@ function applyPeakPreset(key) {
      createVSlider({ mount, dual, low, high, onChange, onInput })
        mount    挂载点元素
        dual     true = 双珠（峰谷），false = 单珠
-       low/high 初始值（0~100，恒满足 low >= high；单珠只用 low）
+       low/high 初始值（0~100，两颗珠独立取值、可任意交叉；单珠只用 low）
        onChange 值变化回调 ({ low, high, byUser })
        onInput  拖动中高频回调（同参，可选）
      .setValues(low, high)   外部装值（不触发 onChange）
@@ -117,7 +121,8 @@ function createVSlider({ mount, dual = false, low = 100, high = 10, onChange = n
 
   let lo = Math.min(100, Math.max(0, Number(low) || 0));
   let hi = Math.min(100, Math.max(0, Number(high) || 0));
-  if (hi > lo) { const x = hi; hi = lo; lo = x; }
+  // 2026-09-29：峰谷两珠独立 —— 值可任意交叉，不再强制 低谷 >= 高峰
+  // （旧逻辑在此把 lo/hi 对调，导致跨越极端期望时珠子语义错位、拖不动）。
   let isDual = !!dual;
   let disabled = false;
   let dragging = null;         // 'low' | 'high' | null
@@ -132,10 +137,13 @@ function createVSlider({ mount, dual = false, low = 100, high = 10, onChange = n
     highEl.setAttribute('aria-valuenow', String(Math.round(hi * 10) / 10));
     el.setAttribute('aria-valuenow', String(Math.round(lo * 10) / 10));
     highEl.style.display = isDual ? '' : 'none';
-    if (isDual && lo > hi) {
+    // 区间带：两珠独立后按「低值 ~ 高值」之间拉带子，与孰高孰低无关
+    if (isDual) {
+      const bLo = Math.min(lo, hi);
+      const bHi = Math.max(lo, hi);
       bandEl.style.display = '';
-      bandEl.style.bottom = hi + '%';
-      bandEl.style.height = (lo - hi) + '%';
+      bandEl.style.bottom = bLo + '%';
+      bandEl.style.height = (bHi - bLo) + '%';
     } else {
       bandEl.style.display = 'none';
     }
@@ -173,15 +181,13 @@ function createVSlider({ mount, dual = false, low = 100, high = 10, onChange = n
   window.addEventListener('pointercancel', onUp);
 
   function moveTo(which, pos, byUser) {
+    // 2026-09-29 修：峰谷两珠独立 —— 珠子可任意交叉，各自只受 [0,100] 约束。
+    // 旧实现强制 低谷>=高峰：想要"高峰更活跃/低谷更安静"时珠子被钳死拖不动，
+    // 且交叉后两珠叠加在一起、再拖任意一颗都无响应 —— 用户报的"峰谷响应调节坏了"。
     if (which === 'high') {
-      hi = pos;
-      if (hi > lo) hi = lo;          // 高峰珠不能越过低谷珠（上界）
+      hi = Math.min(100, Math.max(0, pos));
     } else {
-      lo = pos;
-      // 约束只在双珠时有意义：单珠模式下隐藏的高峰珠是"幽灵下界"，
-      // 会把低谷珠锁死在初始位置以下（表现为"全局档位拖不动"，2026-09-19 修）。
-      if (isDual && lo < hi) lo = hi;
-      if (!isDual) hi = Math.min(hi, lo);   // 维持 lo >= hi 不变量（切双珠时干净）
+      lo = Math.min(100, Math.max(0, pos));
     }
     render();
     if (byUser) {
@@ -214,10 +220,10 @@ function createVSlider({ mount, dual = false, low = 100, high = 10, onChange = n
   return {
     get values() { return { low: lo, high: hi }; },
     setValues(lowV, highV) {
-      let nLo = Math.min(100, Math.max(0, Number(lowV) || 0));
-      let nHi = Math.min(100, Math.max(0, Number(highV ?? nLo) || 0));
-      if (nHi > nLo) { const x = nHi; nHi = nLo; nLo = x; }
-      lo = nLo; hi = nHi; render();
+      // 双珠独立取值：直接按传入值落珠，不做排序对调（2026-09-29）
+      lo = Math.min(100, Math.max(0, Number(lowV) || 0));
+      hi = Math.min(100, Math.max(0, Number(highV ?? lo) || 0));
+      render();
     },
     applyValues(lowV, highV) {
       this.setValues(lowV, highV);
