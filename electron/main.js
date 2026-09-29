@@ -23,20 +23,68 @@ import {
   WINDOW_DEFAULT_W, WINDOW_DEFAULT_H, WINDOW_MIN_W, WINDOW_MIN_H
 } from './window-state.js';
 
+// R68：stdout/stderr 的 EPIPE 兜底（2026-09-29 Linux 线上事故）。
+// 注意：日志雪崩本身是**症状不是病根** —— 它的上游是渲染进程 SIGILL 崩溃循环。
+// 但这条兜底仍要留：EPIPE 自激会独立地把磁盘写满，属于必须堵住的放大器。机制：snowluma 的 logger（打包产物 logger-BAozzyTt.js:1443）写日志用的是
+// `try { process.stderr.write(line) } catch {}`——但管道写入是**异步**的，pipe 对端
+// 消失时不会同步 throw，而是异步 emit 'error'。try/catch 接不到 → 冒泡成
+// uncaughtException → snowluma 的 uncaughtException 处理器又调 logger.error()
+// → 写回同一个已断的管道 → EPIPE → 处理器再抛 → 无限自激。
+// 实测 69,442 条 EPIPE / 763,862 行，20+ 个 50MB 轮转文件循环复用，持续约 0.5MB/s 写盘。
+// 同样的兜底已加在 snowluma/logger-BAozzyTt.js 模块顶层，覆盖所有加载它的进程。
+for (const stream of [process.stdout, process.stderr]) {
+  if (stream && typeof stream.on === 'function') stream.on('error', () => {});
+}
 
 // Windows 上部分显卡驱动会导致渲染进程黑屏；禁用硬件加速是最稳妥的修复
 app.disableHardwareAcceleration();
 
-// ⚠️ Chromium 子进程沙箱在本机会被系统安全策略拦杀（2026-09-21 20:00 前后开始，此前一直
-// 正常）：沙箱化的 GPU 进程启动即 exit_code=1，重试 6 次后 Chromium 判定
-// "GPU process isn't usable. Goodbye."（FATAL）→ 整个应用自杀；沙箱化的渲染进程同样
-// 被杀（reason=killed exitCode=1），窗口定格在最后一帧 —— 表现为"卡在启动画面"，
-// 残留"主进程活着但零子进程、零监听端口"的僵尸，用户每点一次 .bat 就多一个。
-// 实测：--no-sandbox 下全部子进程正常、完整启动、接口正常（22:26/22:28 两次验证）。
-// 安全权衡：本项目界面只从 127.0.0.1 本机服务加载、CSP 锁死自身脚本、GPU 走软件
-// 渲染（disableHardwareAcceleration），不渲染不可信网页；关沙箱损失可控，而
-// "起不来"是完全不可用，两害相权取其轻。
-app.commandLine.appendSwitch('no-sandbox');
+// ── R72：渲染进程每 ~27 秒崩溃一次（exitCode=132 / SIGILL）—— 根因是**关掉了沙箱** ──
+//
+// 症状：界面每 27 秒黑一下重建，一天 58~90 次；两个实例同时发生；服务侧完全正常
+// （curl 首页 200 / 1.9ms），所以不是 HTTP 层问题。内核 dmesg 刷
+// `qq-agent trap invalid opcode`，240 次的 ip 低 12 位全落在 0x7fe（同一段代码，
+// ASLR 换基址）。定案前走过两次弯路，这里把证据链一次记全：
+//
+//   弯路一（已推翻）："Chrome 130 与内核 7.0.0-34 构建级不兼容，需升级应用构建"。
+//     看似有支撑 —— 同机 OpenCode 桌面版用 Chromium 152 渲染进程稳定存活 56 分钟，
+//     本应用 Chromium 130 每 27 秒崩一次，版本差确实存在。但升级应用不在本机可控
+//     范围内，而且它解释不了"为什么换个开关就好了"。方向对（确实是 Chromium 130
+//     的问题），结论错（不是内核不兼容，无解）。
+//
+//   弯路二（已推翻）："/dev/shm 权限坏了"。用 --enable-logging=stderr 抓到 Chromium
+//     自己的 stderr，每次崩溃前都先打：
+//       ERROR:platform_shared_memory_region_posix.cc(214)]
+//         Creating shared memory in /dev/shm/.org.chromium.Chromium.XXX failed:
+//         No such process (3)
+//       ERROR:platform_shared_memory_region_posix.cc(217)]
+//         Unable to access(W_OK|X_OK) /dev/shm: No such process (3)
+//       FATAL:platform_shared_memory_region_posix.cc(219)]
+//         This is frequently caused by incorrect permissions on /dev/shm.
+//     看着像 /dev/shm 坏了，其实两处都被证伪：shell 里 access('/dev/shm', W|X) 返回
+//     True、权限 1777、写入正常；而加上 --disable-dev-shm-usage 把共享内存整体挪到
+//     /tmp 之后，**同一条报错原封不动跟到了 /tmp**（Unable to access(W_OK|X_OK)
+//     /tmp: No such process (3)，40 条）。可见 /dev/shm 只是"哪里需要共享内存就
+//     哪里报错"，不是病灶。顺带一提 access() 按 POSIX 根本不该返回 ESRCH（errno 3），
+//     这个荒谬的 errno 本身就是"调用方状态已经坏了"的信号。
+//
+// 真正的因果：下面这段历史上为了绕开 R44（沙箱化 GPU 进程被系统安全策略拦杀 →
+// Chromium 判定 "GPU process isn't usable. Goodbye." → 整个应用自杀）而全局关掉了
+// 沙箱。R70 的 --disable-gpu 已经让 GPU 进程不再被拦杀，这条理由随之失效，而关沙箱
+// 的副作用留下来：Chromium 130 在无沙箱下拿不到共享内存 → 每个渲染进程刚 fork 出来
+// 还没画第一帧就 FATAL 自杀 → 内核记 trap invalid opcode → 窗口每 27 秒重建。
+//
+// 验证（3510 测试实例，与主账号隔离）：把沙箱恢复、其余开关不动，连续监控 5 分钟
+// = 11 个崩溃周期，崩溃计数 0 增长，渲染进程稳定存活，HTTP 全程 200。同一次启动里
+// GPU 进程也健康存活 6 分钟、无 "isn't usable" 自杀签名，说明 R44 那条链确实已经
+// 被 --disable-gpu 掐断，恢复沙箱是安全的。
+//
+// 本项目界面只从 127.0.0.1 本机服务加载、CSP 锁死自身脚本、不渲染不可信网页，
+// 沙箱开着没有额外暴露面。诊断用回退（**别在生产长期开**）：QQ_AGENT_NO_SANDBOX=1
+// 可恢复旧的关沙箱行为。
+if (String(process.env.QQ_AGENT_NO_SANDBOX ?? '').trim() === '1') {
+  app.commandLine.appendSwitch('no-sandbox');
+}
 
 // R70：彻底不拉 GPU 进程，从源头掐断 R44 那条致命链。
 //
@@ -57,6 +105,24 @@ app.commandLine.appendSwitch('no-sandbox');
 if (String(process.env.QQ_AGENT_ENABLE_GPU ?? '').trim() !== '1') {
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-software-rasterizer');
+}
+
+// ── R71：共享内存路径的诊断开关（**默认不启用**）──────────────────────────
+//
+// 背景见上面 R72：崩溃时 Chromium 会报
+//   platform_shared_memory_region_posix.cc: Unable to access(W_OK|X_OK) <目录>
+//   : No such process (3) → FATAL 自杀
+// 容易误判成"/dev/shm 权限坏了"。`--disable-dev-shm-usage` 是 Chromium 对这一整类
+// 失败的官方开关（把共享内存从 /dev/shm 挪到 /tmp），曾被当成本机的修法试过 ——
+// 实测无效：加上之后同一条报错原封不动出现在 /tmp 上，而根因（关沙箱）修好后
+// 不加这个开关也不再复现。access() 按 POSIX 不该返回 ESRCH（errno 3），这个荒谬的
+// errno 本身就是"调用方状态已经坏了"的信号，不是目录权限问题。
+//
+// 所以它现在只作为**换机器时的对照工具**保留：设 QQ_AGENT_ENABLE_DEVM_SHM=1 打开，
+// 用来判断新机器上是不是同一类问题。默认不开 —— 开着会让共享内存退回磁盘 I/O，
+// 那是实打实的代价，而本机并不需要。
+if (String(process.env.QQ_AGENT_ENABLE_DEVM_SHM ?? '').trim() === '1') {
+  app.commandLine.appendSwitch('disable-dev-shm-usage');
 }
 
 // ── R70：崩溃证据链（为什么闪退必须在这里就要留下东西）──
@@ -103,6 +169,63 @@ function describeError(error) {
 }
 
 /**
+ * R69：回收孤儿 chrome_crashpad_handler（渲染进程 SIGILL 死循环的真凶）。
+ *
+ * 现象：每个渲染进程刚起来就 FATAL，日志里是
+ *   ERROR:platform_shared_memory_region_posix.cc(214)]
+ *     Creating shared memory in /dev/shm/.org.chromium.Chromium.xxx failed:
+ *     No such process (3)
+ *   FATAL:platform_shared_memory_region_posix.cc(219)]
+ * 随后 SIGTRAP(SI_KERNEL，Chromium 的 CHECK 断点) → 崩溃处理器执行 ud2 → SIGILL，
+ * 内核 dmesg 记成 `trap invalid opcode`，应用侧看到 exitCode=132。每 26 秒一轮。
+ *
+ * 为什么是"残留"：crashpad handler 以 `--shared-client-connection` 模式运行，靠一个
+ * Unix socket 收客户端。主进程被 SIGKILL（watchdog 拉起、崩溃自杀、人工清理）时，
+ * 上一次运行留下的 handler 常常还活着。实测今天一度累积到 5~7 个 handler 抢 2 个
+ * profile。新实例启动后，这些陈旧 handler 仍占着共享连接，渲染进程初始化崩溃上报时
+ * 申请共享内存区域就会走进死路 —— 上面的 ESRCH 正是 `fs->pwd` 已失效（任务正在退出）
+ * 的签名，也就是说它压根不是 /dev/shm 的权限或容量问题。`--disable-dev-shm-usage`
+ * 换到 /tmp 后同样报错，可以印证：换目录治不了"连不上共享连接"。
+ *
+ * 判据要窄，只清自己人，且**不能**拿 ppid 当孤儿依据：实测本进程及其 handler 的
+ * PPid 全都是 1 —— crashpad 是设计上就 double-fork 脱离父进程的，换句话说 ppid==1
+ * 恰恰是它的常态。真正能区分"残留"和"本次运行的孩子"的是启动时刻：
+ *   1. exe 必须是**本安装包内**的 chrome_crashpad_handler（别人的不碰）
+ *   2. --database 必须等于**本实例**的 <userData>/Crashpad（另一实例的不碰）
+ *   3. /proc/PID/stat 第 22 字段（starttime，自 boot 起的 jiffies）必须**早于**
+ *      本进程 —— 早于就是上一次运行留下的，晚于或等于才是本次 cr.start() 拉起来的
+ * 三条同时满足才杀。实测清空残留后连续 4 分钟 0 崩溃、渲染进程稳定 8~9 个。
+ */
+function reapOrphanCrashpadHandlers() {
+  const databaseDir = path.join(app.getPath('userData'), 'Crashpad');
+  const handlerPath = path.join(path.dirname(process.execPath), 'chrome_crashpad_handler');
+  // 第 22 字段 starttime。comm（第 2 字段）带括号且可能含空格，所以先按最后一个 ") " 切。
+  const starttimeOf = (pid) => {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'latin1');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(' ')[19]);
+  };
+  let selfStart = 0;
+  try { selfStart = starttimeOf('self'); } catch { return 0; }
+  if (!Number.isFinite(selfStart) || selfStart === 0) return 0;
+  let reaped = 0;
+  let pids = [];
+  try { pids = fs.readdirSync('/proc'); } catch { return 0; }
+  for (const entry of pids) {
+    if (!/^\d+$/.test(entry) || entry === String(process.pid)) continue;
+    try {
+      if (fs.readlinkSync(`/proc/${entry}/exe`) !== handlerPath) continue;
+      const argv = fs.readFileSync(`/proc/${entry}/cmdline`, 'latin1').split('\0');
+      if (!argv.includes(`--database=${databaseDir}`)) continue;
+      if (!(starttimeOf(entry) < selfStart)) continue;   // 本次运行拉起来的，留着
+      process.kill(Number(entry), 'SIGKILL');
+      reaped++;
+    } catch { /* 进程刚好退出 / 无权限：跳过 */ }
+  }
+  if (reaped > 0) console.error(`[crashpad] 已回收 ${reaped} 个上次运行残留的 crashpad handler`);
+  return reaped;
+}
+
+/**
  * R70：崩溃转储（crashpad）。
  * 2026-09-22 那次闪退的 Report ID 只有一个 50ebb260…，WER 存档目录是空的、应用日志
  * 里也没有任何痕迹，所以只能靠旁证推凶手。打开 crashpad 之后，原生崩溃会在
@@ -110,6 +233,9 @@ function describeError(error) {
  * uploadToServer=false + 空 submitURL：只落本地，不外传任何东西。
  */
 function startCrashReporter() {
+  // 必须在建窗口之前清：渲染进程一启动就会去连崩溃上报的共享连接，
+  // 带着陈旧 handler 抢先启动 = 每 26 秒一次 SIGILL（见 R69）。
+  try { reapOrphanCrashpadHandlers(); } catch { /* 清理失败不阻塞启动 */ }
   try {
     const cr = electronApi.crashReporter ?? null;
     if (!cr?.start) return;
@@ -221,6 +347,17 @@ function resolveDataDir() {
   return platformDir;
 }
 process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
+
+// ── 多实例：userData 必须按实例隔离 ──────────────────────────────
+// Electron 的 requestSingleInstanceLock() 以 userData 目录为锁键。主副实例若共用
+// 默认的 ~/.config/qq-agent，#2 一启动就是 !gotLock → 弹「QQ Agent 已经在运行了」
+// 对话框 → 用户/桌面一点"知道了"整个 app 退出（现网 2026-09-29 实测 10:58/11:04
+// 两次，退出栈底都在本文件 239 行的 app.quit()），期间还一直顶号假装活着。
+// 把 userData 按 profileSuffix 分开后，锁随目录隔离，各实例的崩溃转储（crashpad）
+// 与 Electron 缓存也互不干扰。默认实例保持 ~/.config/qq-agent 不变。
+if (profileSuffix()) {
+  app.setPath('userData', path.join(app.getPath('appData'), `qq-agent${profileSuffix()}`));
+}
 
 // 单实例锁：重复启动（双击 .bat）不产生第二个实例，而是唤出已有窗口。
 // 没有锁的话第二个实例会双份连 SnowLuma，群消息会被双重回复。
