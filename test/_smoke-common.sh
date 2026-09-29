@@ -345,10 +345,15 @@ smoke_app_checks() {
   smoke_info "POST /api/snowluma/launch" "HTTP $lcode（触发 snowlumaDir()）"
 
   local SL_DIR="$PREFIX/resources/app/snowluma"
-  if [ -w "$SL_DIR" ]; then
-    # AppImage + extract-and-run / 开发树：解到可写处，应用**就地运行**（这是正确行为）。
-    # 镜像只在安装目录不可写时才需要，此时不该要求 native/ 是软链。
-    smoke_info "SnowLuma 就地运行（无需镜像）" "安装目录可写：$SL_DIR（如 AppImage 的 extract-and-run）"
+  if [ "$SMOKE_KIND" = "appimage" ] && [ ! -L "$MIRROR/native" ]; then
+    # AppImage 的两种运行方式：
+    #   · extract-and-run / FUSE 可写 → 运行目录可写，应用**就地运行**（正确，无需镜像）
+    #   · FUSE 只读挂载 → 走镜像，native 会是符号链接
+    # 冒烟里还额外用 --appimage-extract 复制了一份**只读**树用于载荷检查，那份的权限
+    # 与应用实际运行目录无关 —— 不能拿它 -w 来判"是否需要镜像"。
+    smoke_info "AppImage 就地运行（无需镜像）" "运行目录可写：不要求镜像软链（仅 FUSE 只读挂载时才用镜像）"
+  elif [ -w "$SL_DIR" ]; then
+    smoke_info "SnowLuma 就地运行（无需镜像）" "安装目录可写：$SL_DIR"
   else
     if [ -d "$MIRROR" ]; then
       smoke_pass "镜像目录已创建" "$MIRROR"
