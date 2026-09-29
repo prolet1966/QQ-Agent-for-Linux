@@ -187,7 +187,7 @@ jobs:
             echo "不允许静默跳过：没有冒烟的构建不能算「测试无误」。"
             exit 1
           fi
-          sudo bash test/10-deb-smoke.sh --arch arm64
+          sudo QL_NO_PATCH=1 bash test/10-deb-smoke.sh --arch arm64
 
       - name: 真实安装 + 冒烟测试（rpm）
         if: ${{ github.event.inputs.skip_smoke != 'true' }}
@@ -199,7 +199,7 @@ jobs:
           fi
           # 注意：Ubuntu 上没有 rpm 依赖库，脚本会回退 rpm -i --nodeps 并记为
           # 警告——rpm 的依赖是否满足在本环境**无法验证**，需在 RHEL 系上复测。
-          sudo bash test/20-rpm-smoke.sh --arch arm64
+          sudo QL_NO_PATCH=1 bash test/20-rpm-smoke.sh --arch arm64
 
       - name: rpm 依赖解析验证（对照真实 Fedora / RHEL 元数据）
         run: |
