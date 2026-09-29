@@ -229,15 +229,23 @@ smoke_static_checks() {
   fi
 
   # 补丁是否真的打上了（漏打的包在 Linux 上必坏）
-  if grep -q 'QQA_LINUX_PATCH:snowluma-runtime-mirror' "$PREFIX/resources/app/src/app.js" 2>/dev/null; then
-    smoke_pass "snowluma-runtime-mirror 补丁已应用" "关键：否则 SnowLuma 写配置必失败"
+  #
+  # ⚠️ 2026-09-29：这条只对「Windows 源 + 补丁」产物线成立。本仓库自带 Linux 适配，
+  #    用 --no-patch 直接从仓库组装时（QL_NO_PATCH=1）没有补丁标记 —— 对应功能由
+  #    紧随其后的「SnowLuma 运行目录镜像」实测项验证（镜像已建/native 软链/只读目录零写入）。
+  if [ "${QL_NO_PATCH:-0}" = "1" ]; then
+    smoke_info "跳过补丁标记断言" "QL_NO_PATCH=1：直接使用自带 Linux 适配的仓库代码，功能由镜像实测验证"
   else
-    smoke_fail "snowluma-runtime-mirror 补丁未应用" "Linux 上 SnowLuma 无法写 config/data"
-  fi
-  if grep -q 'QQA_LINUX_PATCH:data-dir-xdg' "$PREFIX/resources/app/electron/main.js" 2>/dev/null; then
-    smoke_pass "data-dir-xdg 补丁已应用" "关键：否则数据写到只读 /opt"
-  else
-    smoke_fail "data-dir-xdg 补丁未应用" "数据会写到只读的 /opt"
+    if grep -q 'QQA_LINUX_PATCH:snowluma-runtime-mirror' "$PREFIX/resources/app/src/app.js" 2>/dev/null; then
+      smoke_pass "snowluma-runtime-mirror 补丁已应用" "关键：否则 SnowLuma 写配置必失败"
+    else
+      smoke_fail "snowluma-runtime-mirror 补丁未应用" "Linux 上 SnowLuma 无法写 config/data"
+    fi
+    if grep -q 'QQA_LINUX_PATCH:data-dir-xdg' "$PREFIX/resources/app/electron/main.js" 2>/dev/null; then
+      smoke_pass "data-dir-xdg 补丁已应用" "关键：否则数据写到只读 /opt"
+    else
+      smoke_fail "data-dir-xdg 补丁未应用" "数据会写到只读的 /opt"
+    fi
   fi
 
   # chrome-sandbox 权限

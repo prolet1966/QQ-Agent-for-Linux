@@ -53,6 +53,10 @@ jobs:
       # CI 上 github.com 直连可达，不需要走镜像（摘要校验照旧生效）。
       # 用 `-` 而非 `:-` 展开，所以这里的空值会原样保留为空。
       QL_GH_MIRROR: ''
+      # 本仓库自带 Linux 适配（数据目录走 XDG、SnowLuma 不可写时建可写镜像），
+      # 直接用仓库代码组装（03-stage --no-patch）——补丁标记断言在审计与三套冒烟里
+      # 都不适用；对应功能由镜像实测项与数据目录落点实测项验证。
+      QL_NO_PATCH: '1'
 
     steps:
       - name: 检出仓库
@@ -126,8 +130,6 @@ jobs:
         run: bash scripts/03-stage.sh --arch arm64 --no-patch --app-src ci-app
 
       - name: 架构审计（x86_64 / PE 混入 / world-writable 即失败）
-        env:
-          QL_NO_PATCH: '1'   # 直接从仓库组装（--no-patch），补丁标记断言不适用
         run: bash test/05-arch-audit.sh --arch arm64
 
       - name: 打 deb 与 rpm
