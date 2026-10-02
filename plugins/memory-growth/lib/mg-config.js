@@ -32,7 +32,8 @@ export function setConfigReader(fn) { reader = fn; cache = null; }
 
 async function readHostConfig() {
   if (reader) { try { return await reader(); } catch { return null; } }
-  try { const mod = await import('../../config.js'); if (mod.getConfig) return mod.getConfig(); } catch {}
+  // 路径修正：同 kb-config.js —— 宿主配置在 src/config.js，需上溯三层
+  try { const mod = await import('../../../src/config.js'); if (mod.getConfig) return mod.getConfig(); } catch {}
   try {
     const fs = await import('node:fs');
     const f = process.env.MEMORY_GROWTH_CONFIG || (process.cwd() + '/data/config.json');

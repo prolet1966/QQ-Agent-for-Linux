@@ -48,7 +48,8 @@ export function applyEnvOverrides(cfgObj) {
 
 async function readHostConfig() {
   if (reader) { try { return await reader(); } catch { return null; } }
-  try { const mod = await import('../../config.js'); if (mod.getConfig) return mod.getConfig(); } catch {}
+  // 路径修正：原写法 ../../ 会解析到 plugins/config.js（不存在），宿主配置在 src/config.js，需上溯三层
+  try { const mod = await import('../../../src/config.js'); if (mod.getConfig) return mod.getConfig(); } catch {}
   try {
     const fs = await import('node:fs');
     const f = process.env.KB_GROWTH_CONFIG || (process.cwd() + '/data/config.json');

@@ -138,7 +138,8 @@ export const providers = {
 async function replaceGifWithFirstFrame(messages) {
   let gifFirstFrameDataUrl;
   try {
-    ({ gifFirstFrameDataUrl } = await import('../src/gif-to-video.js'));
+    // 路径修正：原写法 ../src/ 会解析到 plugins/src/（不存在），宿主模块在 src/，需上溯两层
+    ({ gifFirstFrameDataUrl } = await import('../../src/gif-to-video.js'));
   } catch {
     return null;   // 模块不可加载（理论上不会）→ 走摘图兜底
   }
