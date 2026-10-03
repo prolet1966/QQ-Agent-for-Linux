@@ -1686,6 +1686,9 @@ async function saveConfig({ quiet = false } = {}) {
     patch.snowluma = {
       dir: val('#cfg-snowlumadir', c.snowluma?.dir || '').trim(),
       autoLaunch: chk('#cfg-snowlumalaunch', !!c.snowluma?.autoLaunch),
+      // 绑定账号（空串 = 不绑定）。与下面的地址不同，这个字段保存后**立即生效**：
+      // 后端 applySnowlumaBinding() 会重新解析该账号的端点并按需重连 OneBot。
+      account: val('#cfg-account', c.snowluma?.account || '').trim(),
       wsUrl: val('#cfg-wsurl', c.snowluma?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.snowluma?.httpUrl || '').trim(),
       ...(enteredWsToken && enteredWsToken !== '******' ? { accessToken: enteredWsToken } : {}),

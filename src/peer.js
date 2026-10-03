@@ -102,6 +102,9 @@ export function sanitizePeerStatus(raw) {
         : null
     },
     snowlumaRunning: !!raw.snowluma?.running,
+    // 对端绑定的 QQ 账号：切换器要显示"对端实例在替哪个号干活"。
+    // 只透传账号号本身（不含任何令牌），与其余白名单字段同级别的非敏感信息。
+    account: String(raw.snowluma?.account || ''),
     orchestrator: {
       paused: !!orch.paused,
       model: orch.model ? String(orch.model) : '',

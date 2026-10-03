@@ -1077,6 +1077,14 @@ function renderOnebotSection(c) {
       <div class="hint" id="snowluma-hint"></div></div>
     <div class="checkbox-row"><input type="checkbox" class="sw" id="cfg-snowlumalaunch" ${c.snowluma.autoLaunch ? 'checked' : ''} />
       <label for="cfg-snowlumalaunch">QQ Agent 启动时自动拉起 SnowLuma（未运行时）</label></div>
+    <div class="field"><label>绑定 QQ 账号（本实例只处理这个号；留空 = 用下面的地址）</label>
+      <select id="cfg-account">
+        <option value=""${c.snowluma.account ? '' : ' selected'}>（不绑定，使用下面的 WebSocket / HTTP 地址）</option>
+        ${c.snowluma.account ? `<option value="${esc(c.snowluma.account)}" selected>${esc(c.snowluma.account)}（当前绑定）</option>` : ''}
+      </select>
+      <div class="hint" id="account-hint">SnowLuma 会给<strong>每个已登录账号</strong>各开一套 OneBot 端点，端口由它自己分配
+        （本机实测每账号 +2：3001 / 3003 / 3005），所以「实例 #2 → 3201」这类按公式推导的地址是连不上的。
+        绑定账号后，本实例的地址与令牌全部按该账号在 SnowLuma 里的真实配置解析。</div></div>
     <div class="field-row">
       <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.snowluma.wsUrl)}" /></div>
       <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.snowluma.httpUrl)}" /></div>

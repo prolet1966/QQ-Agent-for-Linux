@@ -57,7 +57,9 @@ export function createRoutes(deps) {
     visionScan,
     buildUsageStats, buildUsageBreakdown,
     peerSnapshot,
-    reloadSkills
+    reloadSkills,
+    // 账号绑定（多账号 / 双实例切换）：列账号、探测在线、套用绑定
+    applySnowlumaBinding, snowlumaAccounts, probeAccount, boundAccountUin, snowlumaBindingStatus
   } = deps;
 
   // 小工具：读请求体（容错：没 body 当空对象）。
@@ -128,6 +130,15 @@ export function createRoutes(deps) {
             dir: snowlumaDir(),
             running: slRunning,
             webuiUrl: snowlumaWebuiUrl(),
+            // 绑定账号：多实例切换器要靠它显示"对端在替哪个号干活"。
+            // peer.js 的 sanitizePeerStatus 会白名单透传这个字段（只是账号号，不含令牌）。
+            account: (typeof boundAccountUin === 'function' ? boundAccountUin() : '') || '',
+            // 实际在用的连接地址 + 绑定是否真的套用成功。
+            // account 只是**配置值**：账号不存在时它照样有值，但连接并没有换 ——
+            // 只有看 binding 才知道真相，否则"绑了没生效"完全不可见。
+            binding: typeof snowlumaBindingStatus === 'function'
+              ? snowlumaBindingStatus()
+              : { account: '', bound: false, applied: false, error: '', wsUrl: '', httpUrl: '' },
             ...snowlumaStatus()
           },
           qqPortable: await qqPortableStatus(),
@@ -1339,6 +1350,47 @@ export function createRoutes(deps) {
     },
 
 
+    {
+      // ── 账号绑定：列出 SnowLuma 里出现过的所有 QQ 账号 ────────────────
+      // 数据来源是 SnowLuma 自己写的 config/onebot_<uin>.json —— 那是唯一权威来源
+      // （端口由 SnowLuma 分配，不能靠公式推算）。离线也能读，SnowLuma 没跑时仍可列出。
+      //
+      // ⚠️「文件存在 ≠ 在线」：SnowLuma 会永久保留每个登录过的账号的配置。
+      //    所以这里会真去打一次 OneBot HTTP 探测谁在线 —— 并发 + 2 秒超时，
+      //    SnowLuma 未运行时它们会一起失败，属正常现象（界面显示「离线」）。
+      method: 'GET', pattern: '/api/onebot/accounts',
+      handler: async ({ res, json }) => {
+        const list = (typeof snowlumaAccounts === 'function' ? snowlumaAccounts() : []) || [];
+        const bound = (typeof boundAccountUin === 'function' ? boundAccountUin() : '') || '';
+        // 绑定是否真的套用成功。绑一个 SnowLuma 里不存在的账号时，配置值会记下来、
+        // 但连接不会变（失败安全）—— 不说清这点，用户会以为已经切过去了。
+        // 这里只读快照，不重复套用，避免惊动现有连接。
+        const bindState = typeof snowlumaBindingStatus === 'function'
+          ? snowlumaBindingStatus()
+          : { bound: false, applied: false, error: '', wsUrl: '', httpUrl: '' };
+        const accounts = await Promise.all(list.map(async (a) => {
+          let p = { online: false };
+          try { p = await probeAccount(a, { timeoutMs: 2000 }); } catch { /* 探测失败按离线 */ }
+          return {
+            uin: String(a.uin),
+            nickname: String(p.nickname || ''),
+            wsPort: Number(a.wsPort) || 0,
+            httpPort: Number(a.httpPort) || 0,
+            online: !!p.online,
+            bound: String(a.uin) === bound
+          };
+        }));
+        return json(res, 200, {
+          ok: true, bound, accounts,
+          // 绑定是否真的生效 + 实际在用的地址（见上面 bindState 的说明）
+          applied: !!bindState.applied,
+          error: String(bindState.error || ''),
+          effectiveWsUrl: String(bindState.wsUrl || ''),
+          effectiveHttpUrl: String(bindState.httpUrl || '')
+        });
+      }
+    },
+
     // ── 多实例：统一控制台（服务端代理）─────────────────────────────
     // 设计：两个实例仍是两个进程（一个进程=一个 QQ 账号），但只开一个统一控制台。
     // 顶栏可切换「当前调控的实例」；切到对端时，前端把所有 /api/* 透明地改成
@@ -1350,9 +1402,13 @@ export function createRoutes(deps) {
         const cfg = getConfig();
         const selfId = String(PROFILE_ID || '1');
         const selfAlias = String(cfg.server?.alias || '').trim() || `实例 #${selfId}`;
+        // 绑定账号：让切换器能直接显示"实例 #2 · 下北沢可汗(2655669027)"，
+        // 而不是让用户靠端口号去猜这个实例究竟在替哪个号干活。
+        const selfAccount = (typeof boundAccountUin === 'function' ? boundAccountUin() : '') || '';
         const list = [{
           id: selfId, alias: selfAlias, self: true,
           port: Number(cfg.server?.port) || null,
+          account: selfAccount,
           online: true
         }];
         const t = resolvePeerTarget(cfg);
@@ -1361,6 +1417,7 @@ export function createRoutes(deps) {
           list.push({
             id: String(t.profile), alias: t.name, self: false,
             port: Number(t.port) || null, url: t.httpUrl,
+            account: (snap && snap.ok) ? String(snap.status?.account || '') : '',
             online: !!(snap && snap.ok),
             status: (snap && snap.ok) ? snap.status : null,
             error: (snap && !snap.ok) ? String(snap.error || '') : ''
@@ -1427,6 +1484,11 @@ export function createRoutes(deps) {
         sessions?.setKeepFiles?.(next.store?.keepSessionFiles ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
         initPriceFeed(FIXED_PRICE_FEED_URL);
+        // 账号绑定即时生效（2026-10-02）：保存设置后立刻套用，覆盖三种情形 ——
+        // 「未绑定→已绑定」「换一个账号」「解绑」。地址确实变了它才重连 OneBot，
+        // 因此不必重启整个应用。放在 emit 之前，让前端拿到的状态就是新连接的。
+        try { applySnowlumaBinding?.({ reconnect: true }); }
+        catch (e) { log?.('[onebot] 套用账号绑定失败：', e?.message ?? e); }
         emit('status', { configUpdated: true });
         // ⚠️ 必须脱敏：updateConfig 返回的是内存里的活配置对象，含明文 apiKey /
         //    accessToken / dshProviderKeys。GET /api/config 一直是脱敏的，

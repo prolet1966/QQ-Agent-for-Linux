@@ -30,6 +30,9 @@ import { createPeerMonitor } from './peer.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
+// 账号发现：从 SnowLuma 自己写的 per-uin 配置读出「账号 → OneBot 端点」的权威映射。
+// 多账号场景下这是唯一可靠来源（端口由 SnowLuma 分配，端口号不能靠公式猜）。
+import { listOneBotAccounts, findAccount, accountEndpoints, probeAccount } from './onebot-accounts.js';
 // 平台抽象层：Windows / Linux 的差异（进程查询、打开器、QQ 路径、SnowLuma 运行时）
 // 全部收敛在 platform.js，本文件不再直接出现 wmic / explorer.exe / cmd.exe / node.exe。
 import * as platform from './platform.js';
@@ -251,9 +254,17 @@ export function createApp({ log = console.log } = {}) {
     return '';
   }
 
+  // 已绑定账号解析出的 OneBot WS 地址（由 applySnowlumaBinding() 设置；空 = 未绑定）。
+  // 刻意**不写回** getConfig()：用户配置里的 snowluma.wsUrl 是"未绑定时"的兜底，
+  // 若被解析结果覆盖，用户就看不出自己当初配了什么、也无法对照排查。
+  let effectiveSnowlumaWsUrl = '';
+
   function snowlumaWsPort() {
     try {
-      const wsUrl = String(getConfig().snowluma?.wsUrl || 'ws://127.0.0.1:3001');
+      // 绑定账号后，权威地址是 applySnowlumaBinding() 解析出的那个 ——
+      // getConfig().snowluma.wsUrl 仍是未绑定的旧值（我们故意不写回用户配置）。
+      // 若这里不跟随，端口就绪轮询会一直盯着 3001，账号实际在 3005 时永远等不到。
+      const wsUrl = String(effectiveSnowlumaWsUrl || getConfig().snowluma?.wsUrl || 'ws://127.0.0.1:3001');
       const u = new URL(wsUrl);
       if (u.port) return Number(u.port);
     } catch { /* ignore */ }
@@ -980,6 +991,102 @@ export function createApp({ log = console.log } = {}) {
     return out;
   }
 
+  // ── 绑定账号（多账号 / 双实例切换）──────────────────────────────────────
+  /** 当前绑定的 QQ 号；空串 = 未绑定。 */
+  function boundAccountUin() {
+    try { return String(getConfig().snowluma?.account || '').trim(); } catch { return ''; }
+  }
+
+  /** SnowLuma 的账号列表。每次现读磁盘 —— SnowLuma 新登录一个账号后无需重启本实例。 */
+  function snowlumaAccounts() {
+    try { return listOneBotAccounts(snowlumaDir()); } catch { return []; }
+  }
+
+  /**
+   * 把「绑定账号」套用到 OneBot 连接参数上。**幂等**，启动时与每次保存配置后都可调用。
+   *
+   * · 未绑定（snowluma.account 为空）→ 沿用 getConfig().snowluma.wsUrl/httpUrl，
+   *   与旧版行为完全一致，老配置不受影响。
+   * · 已绑定 → 从 SnowLuma 的实际配置解析该账号真实在用的 host/port/path/token。
+   *   令牌候选同时**收敛为这一个**：跨账号轮换不是"修复"，而是静默连上别人的账号
+   *   （连上了、也不报错，但处理的是另一个 QQ 的消息 —— 比连不上更危险）。
+   *
+   * @param {{reconnect?: boolean}} opts 地址确有变化时才重连（避免无谓断连）
+   */
+  /**
+   * 最近一次绑定的结果快照。绑定失败（账号不存在、SnowLuma 没跑过）**不抛错、
+   * 也不改动现有连接** —— 只把原因记在这里，让接口能如实告诉用户"绑了但没生效"。
+   * 少了它，界面只会显示配置里那个账号号，用户无法分辨到底连没连上。
+   */
+  let lastSnowlumaBinding = { bound: false, applied: false };
+
+  function applySnowlumaBinding(opts = {}) {
+    const r = applySnowlumaBindingInner(opts);
+    lastSnowlumaBinding = r;
+    return r;
+  }
+
+  /** 供接口展示的绑定状态：配置值 + 是否真生效 + **实际在使用**的连接地址。 */
+  function snowlumaBindingStatus() {
+    return {
+      account: boundAccountUin(),
+      bound: !!lastSnowlumaBinding?.bound,
+      applied: !!lastSnowlumaBinding?.applied,
+      error: String(lastSnowlumaBinding?.error || ''),
+      wsUrl: String(onebot.wsUrl || ''),
+      httpUrl: String(onebot.httpUrl || '')
+    };
+  }
+
+  function applySnowlumaBindingInner({ reconnect = false } = {}) {
+    let cfg;
+    try { cfg = getConfig(); } catch { return { bound: false, applied: false }; }
+    const wantUin = boundAccountUin();
+
+    // 未绑定：回到配置里的地址（从"已绑定"改回来时走这条）
+    if (!wantUin) {
+      const ws = String(cfg.snowluma?.wsUrl || '').trim();
+      const http = String(cfg.snowluma?.httpUrl || '').trim().replace(/\/+$/, '');
+      const changed = !!ws && (onebot.wsUrl !== ws || (!!http && onebot.httpUrl !== http));
+      if (ws) onebot.wsUrl = ws;
+      if (http) onebot.httpUrl = http;
+      effectiveSnowlumaWsUrl = ws || onebot.wsUrl;
+      if (changed) {
+        // 令牌候选回到"全候选 + 401 轮换"模式：sig 必须清掉，否则
+        // syncSnowlumaTokens() 会认为候选集没变而不重新应用。
+        lastSyncTokenSig = '';
+        syncSnowlumaTokens();
+        log(`[onebot] 已解除账号绑定，回到配置地址 ws=${onebot.wsUrl}`);
+        if (reconnect) onebot.reconnect();
+      }
+      return { bound: false, applied: changed, wsUrl: onebot.wsUrl };
+    }
+
+    const acct = findAccount(snowlumaAccounts(), wantUin);
+    if (!acct) {
+      // 账号还没在 SnowLuma 出现过：保持现状，绝不退化成"连到别的账号"
+      log(`[onebot] 绑定账号 ${wantUin}：SnowLuma 配置里没有它（SnowLuma 未运行过，或该账号还没登录过），暂用现有地址`);
+      return { bound: true, account: wantUin, applied: false, error: '账号在 SnowLuma 配置中不存在' };
+    }
+
+    const ep = accountEndpoints(acct);
+    const httpUrl = String(ep.httpUrl || '').replace(/\/+$/, '');
+    const changed = onebot.wsUrl !== ep.wsUrl || (!!httpUrl && onebot.httpUrl !== httpUrl);
+
+    effectiveSnowlumaWsUrl = ep.wsUrl;
+    onebot.wsUrl = ep.wsUrl;
+    if (httpUrl) onebot.httpUrl = httpUrl;
+    onebot.accessToken = ep.accessToken;
+    onebot.httpToken = ep.httpAccessToken;
+    onebot.tokenCandidates = [{ wsToken: ep.accessToken, httpToken: ep.httpAccessToken }];
+
+    if (changed) {
+      log(`[onebot] 已绑定账号 ${wantUin}：ws=${ep.wsUrl} http=${httpUrl}`);
+      if (reconnect) onebot.reconnect();
+    }
+    return { bound: true, account: wantUin, applied: changed, wsUrl: ep.wsUrl, httpUrl, nickname: acct.nickname || '' };
+  }
+
   /** 候选游标：401 时递增轮换。连上后会钉住当前生效下标。 */
   let tokenCandidateIndex = 0;
 
@@ -996,6 +1103,11 @@ export function createApp({ log = console.log } = {}) {
   /** 把候选列表同步进配置 + 挂到 onebot 实例（不立即连接）。返回是否有变化。 */
   function syncSnowlumaTokens() {
     try {
+      // 绑定了账号：令牌由 applySnowlumaBinding() 独占管理（只认该账号那一个）。
+      // 这里若继续收集全候选并 applyTokens(candidates[0])，会按**文件序**拿到
+      // 别的账号的令牌 —— 它照样能连上，但连上的是别人，属于静默错误。
+      if (boundAccountUin()) return false;
+
       const candidates = readSnowlumaTokenCandidates();
       if (!candidates.length) return false;
       const sig = candidates.map((c) => `${c.wsToken}|${c.httpToken}`).join(';');
@@ -1019,6 +1131,12 @@ export function createApp({ log = console.log } = {}) {
     const now = Date.now();
     if (now - tokenSyncRetryAt < 5000) return;   // 限频
     tokenSyncRetryAt = now;
+    // 绑定账号：重新解析该账号的端点与令牌（SnowLuma 可能重建过配置、换过令牌），
+    // 但**不做跨账号轮换** —— 连上别人的账号比连不上更糟。
+    if (boundAccountUin()) {
+      applySnowlumaBinding({ reconnect: true });
+      return;
+    }
     // ⚠️ 先重读磁盘：全新安装是"先启动后登录"，候选集是启动时的 [空令牌]；
     // 登录后 per-uin 文件才带着真令牌落盘。不回读就会拿空令牌 401 到天荒地老。
     const refreshed = syncSnowlumaTokens();
@@ -1508,7 +1626,12 @@ export function createApp({ log = console.log } = {}) {
     visionScan, isPortOpen,
     buildUsageStats, buildUsageBreakdown,
     peerSnapshot: peerMonitor.snapshot,
-    reloadSkills
+    reloadSkills,
+    // 账号绑定（多账号 / 双实例切换）：
+    // 漏传这几个会让 /api/onebot/accounts 恒返回空列表、绑定状态恒为空串 ——
+    // 而且因为 routes.js 侧用的是 `typeof x === 'function'` 存在性检查，
+    // 症状是"接口 200 但什么都不报"，很难从日志看出是依赖没注入。
+    applySnowlumaBinding, snowlumaAccounts, probeAccount, boundAccountUin, snowlumaBindingStatus
   });
 
   async function handleHttp(req, res) {
@@ -1763,6 +1886,9 @@ export function createApp({ log = console.log } = {}) {
 
     await Promise.all([skillsReady, snowlumaReady]);
 
+    // 顺序不能反：先套用账号绑定（绑定时解析出该账号的 ws/http/令牌并把候选收敛为它），
+    // 再同步令牌候选 —— 未绑定时后者才需要跑（它会按配置地址重置 wsUrl）。
+    applySnowlumaBinding();
     // OneBot 连接前先尝试从 SnowLuma 配置同步令牌（脱敏副本/首次登录场景尤其重要）
     if (syncSnowlumaTokens()) {
       const c = getConfig();
@@ -1820,7 +1946,9 @@ export function createApp({ log = console.log } = {}) {
         .catch((error) => log(`[usage] 后台预热失败（首次打开用量页时会现场重算）：${error?.message ?? error}`));
     }, 8000);
     usageWarmTimer.unref?.();
-    log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
+    // 打印**实际生效**的地址（onebot 实例上的），而不是配置里的兜底值 ——
+    // 绑定账号时两者不同，看配置值会让人误以为连错了端口。
+    log(`OneBot（SnowLuma）: ws=${onebot.wsUrl} http=${onebot.httpUrl}${boundAccountUin() ? `（已绑定账号 ${boundAccountUin()}）` : ''}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
     return port;
   }
@@ -1886,7 +2014,9 @@ export function createApp({ log = console.log } = {}) {
     releaseInstanceLock();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills,
+    // 账号绑定相关：routes.js 保存配置后即时套用；/api/onebot/accounts 列账号用
+    applySnowlumaBinding, snowlumaAccounts, probeAccount, boundAccountUin, snowlumaBindingStatus };
 }
 
 /**

@@ -59,7 +59,11 @@ function paintInstSwitch() {
   const peer = isPeerView();
   box.classList.toggle('peer', peer);
   const label = $('#inst-switch-label');
-  if (label) label.textContent = state.activeInst.alias || (peer ? `实例 #${state.activeInst.id}` : '本机');
+  // 顶栏同时显示「当前在调控哪个实例、它在替哪个 QQ 号干活」——
+  // 双实例最容易搞混的恰恰是"我眼前这个界面到底是哪个号"。
+  const acct = state.activeInst.account ? ` · ${state.activeInst.account}` : '';
+  const base = state.activeInst.alias || (peer ? `实例 #${state.activeInst.id}` : '本机');
+  if (label) label.textContent = base + acct;
   const dot = $('#inst-dot');
   if (dot) dot.title = peer ? '当前调控：对端实例' : '当前调控：本实例';
 }
@@ -69,7 +73,8 @@ function renderInstMenu() {
   if (!menu) return;
   menu.innerHTML = (instList.length ? instList : [{ id: '', alias: '本机', self: true }]).map((it) => {
     const active = it.self ? !isPeerView() : (isPeerView() && String(it.id) === String(state.activeInst.id));
-    const meta = it.self ? '本机' : (`#${it.id} · ${it.online ? '在线' : '离线'}`);
+    const acct = it.account ? ` · ${it.account}` : '';
+    const meta = it.self ? `本机${acct}` : (`#${it.id} · ${it.online ? '在线' : '离线'}${acct}`);
     return `<button class="inst-item${active ? ' active' : ''}" data-inst="${esc(String(it.id))}" data-self="${it.self ? '1' : '0'}">
       <span class="inst-dot"></span>
       <span>${esc(it.alias || ('实例 #' + it.id))}</span>
@@ -103,7 +108,9 @@ function setActiveInstance(it) {
   state.activeInst = {
     self: !!it.self,
     id: String(it.id || ''),
-    alias: it.alias || ''
+    alias: it.alias || '',
+    // 该实例绑定的 QQ 账号（没有则空）——顶栏与菜单都靠它区分"这是哪个号"
+    account: it.account || ''
   };
   // 清掉上个实例的缓存视图，避免切换瞬间闪现旧数据
   state.sessions = [];

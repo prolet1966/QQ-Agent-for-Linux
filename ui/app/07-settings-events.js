@@ -1166,6 +1166,47 @@ function bindSettingsEvents(c) {
   });
 
   // ── OneBot 区块事件 ──
+  // 「绑定 QQ 账号」下拉：选项从后端实时拉（/api/onebot/accounts 直接读 SnowLuma 的
+  // per-uin 配置），所以 SnowLuma 新登录一个账号后不用重启本应用就能选到。
+  //
+  // 选中后的保存**刻意不在这里做**：#settings-form 的 change 监听（见下方
+  // "表单变动监听"）已覆盖所有 select，这里再加一个只会造成双重 POST。
+  const accountSel = $('#cfg-account');
+  if (accountSel) {
+    (async () => {
+      const hint = $('#account-hint');
+      try {
+        const d = await api('/api/onebot/accounts');
+        const list = Array.isArray(d.accounts) ? d.accounts : [];
+        const cur = accountSel.value;
+        const opts = ['<option value="">（不绑定，使用下面的 WebSocket / HTTP 地址）</option>'];
+        for (const a of list) {
+          const label = `${a.nickname ? a.nickname + ' ' : ''}(${a.uin})  WS:${a.wsPort}${a.online ? ' · 在线' : ' · 离线'}`;
+          opts.push(`<option value="${esc(a.uin)}"${String(a.uin) === cur ? ' selected' : ''}>${esc(label)}</option>`);
+        }
+        // 已绑定的账号若从 SnowLuma 配置里消失（换机器 / 清过配置），仍要把它显示出来 ——
+        // 否则下拉会静默回落到「不绑定」，用户还以为绑定仍然有效。
+        if (cur && !list.some((a) => String(a.uin) === cur)) {
+          opts.push(`<option value="${esc(cur)}" selected>${esc(cur)}（SnowLuma 里暂无此账号）</option>`);
+        }
+        accountSel.innerHTML = opts.join('');
+        if (hint) {
+          if (d.bound && d.applied === false && d.error) {
+            // 绑了但没生效 —— 必须说出来。否则界面只会显示那个账号号，
+            // 用户以为已经切过去了，实际还连在原来的账号上。
+            hint.textContent = `⚠️ 已绑定 ${d.bound}，但尚未生效：${d.error}。当前实际连接 ${d.effectiveWsUrl || '（未设置）'}。`;
+          } else if (d.bound && d.applied) {
+            hint.textContent = `已绑定 ${d.bound}，实际连接 ${d.effectiveWsUrl || '（未设置）'}。`;
+          } else if (!list.length) {
+            hint.textContent = 'SnowLuma 里还没有任何账号记录 —— 先到「SnowLuma」页签启动它并登录一个 QQ 号，这里就会出现可选账号。';
+          }
+        }
+      } catch (e) {
+        if (hint) hint.textContent = `读取账号列表失败：${e.message}`;
+      }
+    })();
+  }
+
   const openSnowlumaBtn = $('#open-snowluma-btn');
   if (openSnowlumaBtn) openSnowlumaBtn.addEventListener('click', async () => {
     await saveConfig({ quiet: true });
