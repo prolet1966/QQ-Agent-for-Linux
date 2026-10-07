@@ -131,15 +131,15 @@ PIXMAP_DIR="/usr/share/pixmaps"
 #    `data/` 与 `data-<profile>/`，又不再误伤 node_modules 深处；
 #    顺带修掉「node_modules/<pkg>/data/ 这类嵌套 data 目录被误排」的同类隐患。
 EXCLUDE_PATTERNS=(
-  # data：运行时数据，**故意不锚定** —— 任意深度的 data/ 目录都算运行期状态。
-  #   注意它只能写成没有通配符的 "data"：一旦写成 "data-*"（未锚定，无斜杠），
-  #   tar 会按**路径段**去匹配，于是连 node_modules/undici/lib/web/fetch/data-url.js
-  #   一起排掉 —— 那正是云端 28f2198 这次提交在修的事故，我 2026-10-07 又复现了一次
-  #   （stage 组装被 REQUIRED_PRESENT 正面拦下，见下）。
-  "data"
-  # 多实例数据目录 data-2 / data-3 … 里就是 config.json（明文 API Key），漏排等于把
-  # 密钥打进发布包。**必须带 ./ 锚定**：带斜杠的 pattern 按完整路径匹配，
-  # 只会命中根级的 ./data-2，不会碰到深处的 data-url.js。
+  # ── 运行时数据：**必须锚定到 ./** ─────────────────────────────────────
+  # 只排"应用根下自己的 data/ 与多实例 data-2/data-3"，绝不碰第三方包里同名目录。
+  # 反面教材（两种都踩过）：
+  #   · 未锚定的 "data-*" —— 无斜杠 ⇒ tar 按**路径段**匹配 ⇒ 连
+  #     node_modules/undici/lib/web/fetch/data-url.js 一起排掉（云端 28f2198 的事故，
+  #     2026-10-07 本地又复现一次，被 REQUIRED_PRESENT 拦下）；
+  #   · 未锚定的 "data" —— 同样会吃掉 node_modules/pkg/data/，破坏依赖完整性。
+  # test/70-requires-gate-test.sh 的 A/B 两段就是钉这件事的回归门禁。
+  # data-* 覆盖多实例数据目录（data-2… 里有明文 API Key），漏排等于把密钥打进发布包。
   "./data"
   "./data-*"
   "community.key"
