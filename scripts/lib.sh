@@ -142,9 +142,14 @@ EXCLUDE_PATTERNS=(
   "snowluma/config.auto-*"
   "snowluma/data"
   "snowluma/logs"
-  "test"
-  "doc"
-  "scripts"
+  # ⚠️ 这三条必须**锚定到 ./**：tar 的 --exclude 是按**路径段**匹配的，
+  #    写成裸 "scripts" 会把任意深度的 scripts/ 一起吃掉。
+  #    2026-10-07 实测：skills/jmcomic/scripts/（jm.py / jm.sh / jm_tags.json / setup.py / jm.cmd）
+  #    被整目录排除 —— 而 jmcomic 的 index.js 硬依赖 scripts/jm.py，缺了直接报
+  #    "skill 目录不完整（scripts/jm.py 缺失）"，功能静默失效；deb/rpm/AppImage 全中招。
+  "./test"
+  "./doc"
+  "./scripts"
   "*.log"
   "*.md.bak"
   "__pycache__"
@@ -159,6 +164,10 @@ EXCLUDE_PATTERNS=(
 # 事故就是这么漏过去的。
 REQUIRED_PRESENT=(
   "node_modules/undici/lib/web/fetch/data-url.js"
+  # 2026-10-07：正是这条断言该拦下的那类事故 —— jmcomic 的 CLI 依赖 scripts/jm.py，
+  # 而裸 "scripts" 排除规则把它静默吃掉过一整个发布周期。
+  "skills/jmcomic/scripts/jm.py"
+  "skills/jmcomic/scripts/jm_tags.json"
 )
 
 # ── 隐私红线：内容复检断言（99-selfcheck --input / 03-stage.sh 共用）──
