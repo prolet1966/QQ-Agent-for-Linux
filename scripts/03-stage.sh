@@ -124,6 +124,13 @@ if [ "$MODE" = "app-tarball" ]; then
   assert_no_redline "$local_stage" || die "红线复检不通过，拒绝产出 tar"
 
   echo
+  echo "--- 正向完整性断言（★ 2026-10-06 data-url.js 事故的正面闸门）---"
+  # 只断言"不该有的没有"是不够的：排除规则过宽会把必需文件静默吃掉。
+  # 这两步分别是"白名单文件必须在位"与"跟着 require 图一个都不能缺"。
+  assert_required_present "$local_stage" || die "必需文件缺失，拒绝产出 tar"
+  assert_requires_complete "$local_stage" || die "依赖图残缺，拒绝产出 tar"
+
+  echo
   echo "--- snowluma 必须已被整棵排除 ---"
   if [ -e "$local_stage/snowluma" ]; then
     die "snowluma/ 未被排除！(Windows 原生件会混入包) 请检查 tar 的 --exclude 语义"
@@ -192,6 +199,12 @@ ok "应用代码已复制"
 echo
 echo "--- 隐私红线复检（复制完立刻做）---"
 assert_no_redline "$APPDIR" || die "红线复检不通过，中止组装"
+
+echo
+echo "--- 正向完整性断言（复制阶段也要做，别等到打完包才发现少了模块）---"
+assert_required_present "$APPDIR" || die "必需文件缺失，中止组装"
+assert_requires_complete "$APPDIR" || die "依赖图残缺，中止组装"
+
 if [ -e "$APPDIR/snowluma" ]; then
   warn "snowluma/ 居然还在（排除没生效？）—— 马上会被整棵替换，但请检查 --exclude 语义"
 fi
@@ -216,6 +229,10 @@ if [ "$DO_PATCH" = 1 ]; then
 else
   warn "跳过了补丁（--no-patch）——产物在 Linux 上跑不起来，仅供调试"
 fi
+
+echo
+echo "--- 补丁后依赖图复检（补丁若新增 require，必须在这里就被抓住）---"
+assert_requires_complete "$APPDIR" || die "补丁后依赖图残缺，中止组装"
 
 echo
 echo "===== 5. 启动器 / 桌面项 ====="

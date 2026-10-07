@@ -27,7 +27,15 @@ PKG_NAME="qq-agent"
 # 它与 package.json 的 version（【应用版本】，即上游 Windows 版 V0.4.4）是两回事：
 # 本移植版只重新打包、不改应用代码，故 package.json 保持 0.4.4 不动。
 # 0.4.5 = 仅修复 deb/rpm 启动器的 Chromium 沙箱判据（见 scripts/03-stage.sh）。
-APP_VERSION="0.4.4.1"
+# ── 分发版本（唯一口径）─────────────────────────────────────────────────
+# 2026-10-07 统一：仓库里长期存在"标题 0.4.6 / 包版本 0.4.4.1"这类不一致
+# （v0.4.6-linux 与 v0.4.6-linux-r2 两个正式发布的 APP_VERSION 都是 0.4.4.1，
+#   而 v0.4.7-arm64 里是 0.4.7）。现在起以**这里**为唯一真源：
+#   lib.sh 的 APP_VERSION == deb/rpm/AppImage 文件名 == git tag == Release 标题。
+# 0.4.7 = 0.4.6 + neo-plan 接入（阶段0 构建门禁、阶段1 基线、阶段2 宿主改造、
+#         阶段3 十个扩展接入、阶段4 只读面板与可解释性、阶段5 预检与可回滚接入包）。
+# 需要临时改版本号时用 QL_APP_VERSION=... 覆盖即可（CI 与本地同一套代码）。
+APP_VERSION="${QL_APP_VERSION:-0.4.7}"
 PKG_RELEASE="1"
 ELECTRON_VERSION="33.4.11"
 SNOWLUMA_VERSION="1.14.19"
@@ -111,8 +119,23 @@ PIXMAP_DIR="/usr/share/pixmaps"
 # 「绝不能打进分发给别人的安装包」，必须排除。
 #
 # 复制策略：用 rsync 的 exclude 列表，或 tar 的 --exclude，一律带上这些。
+#
+# ⚠️ 2026-10-06 实际事故 —— 根目录的 `data` / `data-*` 必须写成 `./data` / `./data-*`：
+#    tar 的 --exclude **默认不锚定**（模式可匹配路径中的任意一段），
+#    于是 `--exclude=data-*` 把
+#      node_modules/undici/lib/web/fetch/data-url.js
+#    也一起排掉了。而 undici/lib/web/fetch/util.js 第 7 行 `require('./data-url')`，
+#    fetch 链路直接抛 MODULE_NOT_FOUND —— 应用只能降级成 undici 默认 10s 连接超时。
+#    该缺陷已随 0.4.6 的 deb / rpm / AppImage / app-code tar 一起发出（见 REQUIRED_PRESENT）。
+#    加 `./` 前缀后模式锚定到应用根（tar 成员名以 `./` 开头），既排掉根目录的
+#    `data/` 与 `data-<profile>/`，又不再误伤 node_modules 深处；
+#    顺带修掉「node_modules/<pkg>/data/ 这类嵌套 data 目录被误排」的同类隐患。
 EXCLUDE_PATTERNS=(
+  # data：运行时数据，**故意不锚定**（云端既有做法）—— 任意深度的 data/ 都算运行期状态。
   "data"
+  # data-*：多实例数据目录（data-2 / data-3 …）里就是 config.json（明文 API Key），
+  #   漏排等于把密钥打进发布包。云端某次提交把它删掉了，这里**加回来**。
+  "data-*"
   "community.key"
   "community.key.example"
   "snowluma/config"
@@ -126,6 +149,16 @@ EXCLUDE_PATTERNS=(
   "*.md.bak"
   "__pycache__"
   ".git"
+)
+
+# ── 正向断言：这些文件必须存在于 stage 产物里 ────────────────────────────
+#
+# 为什么需要：原来的 assert_no_redline 只断言「不许有什么」（data/config.json、
+# community.key、snowluma/data …），**缺"必须有什么"那一侧**。所以当某个排除
+# 规则过宽、把必需文件静默吃掉时，全套自检照样全绿 —— 上面那起 data-url.js
+# 事故就是这么漏过去的。
+REQUIRED_PRESENT=(
+  "node_modules/undici/lib/web/fetch/data-url.js"
 )
 
 # ── 隐私红线：内容复检断言（99-selfcheck --input / 03-stage.sh 共用）──
@@ -193,6 +226,54 @@ assert_no_redline() {
   fi
   ok "红线复检通过（0 项硬命中，${warns} 项警告）"
   return 0
+}
+
+# ── 正向完整性断言（"必须有什么"那一侧）─────────────────────────────────
+#
+# 背景：assert_no_redline 只断言「不许有什么」。2026-10-06 的 data-url.js 事故
+# 里，`--exclude=data-*` 非锚定匹配把 node_modules 深处的必需文件一起排掉，
+# 而**所有负面断言照样全绿** → 三代产物全部带着这个缺陷发布。
+#
+# 所以完整性必须两向都断言：
+#   1. assert_required_present  —— REQUIRED_PRESENT 清单里的文件必须存在
+#   2. assert_requires_complete —— 跟着 require 图走，任何被引用却缺失的模块
+#
+# 调用：assert_required_present <root> || die
+# 命中缺失返回 1（不直接 exit，方便调用方聚合报错）。
+assert_required_present() {
+  local root="$1"
+  [ -d "$root" ] || die "assert_required_present：目录不存在：$root"
+  local rel fails=0
+  for rel in "${REQUIRED_PRESENT[@]}"; do
+    if [ -e "$root/$rel" ]; then
+      ok "必需文件在位: $rel"
+    else
+      printf '\033[31m  ✗ 缺少必需文件\033[0m %s\n' "$rel" >&2
+      printf '     多半被某条 --exclude 误伤 → 检查 EXCLUDE_PATTERNS 是否锚定到 ./\n' >&2
+      fails=$((fails + 1))
+    fi
+  done
+  [ "$fails" -eq 0 ] || return 1
+  return 0
+}
+
+# 依赖图完整性：跟着相对 require 走，任何解析不到的目标都算缺失。
+# 调用：assert_requires_complete <root> || die
+#   退出码语义：verifier 0=干净 / 1=有缺失 / 2=用法或目录错误 —— 三种都当失败处理，
+#   因为把"工具没跑起来"当成"没有问题"正是上一代门禁失效的方式。
+assert_requires_complete() {
+  local root="$1"
+  local verifier="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify-no-missing-requires.mjs"
+  [ -d "$root" ] || die "assert_requires_complete：目录不存在：$root"
+  [ -f "$verifier" ] || die "assert_requires_complete：找不到校验器 $verifier"
+  command -v node >/dev/null 2>&1 || die "assert_requires_complete：需要 node 才能跑依赖图校验"
+  local rc=0
+  node "$verifier" "$root" || rc=$?
+  case "$rc" in
+    0) ok "依赖图完整（相对 require 0 缺失）"; return 0 ;;
+    1) printf '\033[31m  ✗ 依赖图残缺：有被引用却缺失的模块\033[0m\n' >&2; return 1 ;;
+    *) printf '\033[31m  ✗ 依赖图校验器异常退出（rc=%s）—— 不视为通过\033[0m\n' "$rc" >&2; return 1 ;;
+  esac
 }
 
 # ── 运行时依赖 ──
@@ -544,7 +625,14 @@ TYPE2RUNTIME_URL_BASE="https://github.com/AppImage/type2-runtime/releases/downlo
 # 国内直连 github.com 不通时用的镜像前缀（可用 QL_GH_MIRROR 覆盖；留空表示直连）
 QL_GH_MIRROR="${QL_GH_MIRROR-https://gh-proxy.com/}"
 
-APPIMAGETOOL_SHA256_x86_64="a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0"
+# ⚠️ appimagetool 的 x86_64 资产挂在 AppImage/appimagetool 的 **continuous** 标签下，
+#    上游会**定期重建**它（不是不可变资产）⇒ 这里的摘要会周期性失效。
+#    2026-10-07 实测：旧 pin a6d71e2b… 已失效，新资产 sha256=95cbe7cc…，
+#    其 `--version` 为 "continuous build (git version 854e19e), build 313 built on 2026-10-04"，
+#    并用它成功产出 AppImage（产物另经 unsquashfs 独立校验）。
+#    对照：type2-runtime 的 pin 仍然匹配 ⇒ 说明**不是**下载链路被篡改，是上游资产漂移。
+#    再次漂移时无需改脚本：QL_APPIMAGETOOL_SHA256_X86_64=<实测哈希> bash scripts/06-....sh
+APPIMAGETOOL_SHA256_x86_64="95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6"
 APPIMAGETOOL_SHA256_aarch64="1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe"
 TYPE2RUNTIME_SHA256_x86_64="1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
 TYPE2RUNTIME_SHA256_aarch64="b4ff0030242d0c3bb12ce40541828303cf167493f4793456f0436edd6255c39d"

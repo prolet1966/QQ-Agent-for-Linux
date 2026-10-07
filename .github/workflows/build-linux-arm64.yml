@@ -123,6 +123,27 @@ jobs:
           # 复检不通过会 exit 1，构建直接红掉——绝不允许把含隐私数据的代码打进包
           bash scripts/99-selfcheck.sh --input ci-app
 
+      # ★ 2026-10-07 新增（neo-plan 阶段 0 / R11）：
+      #   之前流水线只有"不该有什么"的负面断言，没有"必须有什么"的正面断言，
+      #   于是 --exclude=data-* 非锚定匹配把 undici/.../data-url.js 排掉时，
+      #   烟测 27/0/0、依赖图 0 缺失（那时根本没跑过依赖图）、包内扫描 0 命中——全绿。
+      #   这一步显式跑依赖图校验，并把退出码语义写死（0 通过 / 1 缺失 / 2 用法错误都算失败）。
+      - name: 依赖图完整性硬门（★ data-url.js 事故的正面闸门）
+        run: |
+          set -e
+          node scripts/verify-no-missing-requires.mjs ci-app
+          echo "依赖图校验通过（退出码 0）"
+
+      - name: 构建门禁回归测试（锚定排除 + 好树/坏树退出码）
+        run: |
+          set -e
+          T=test/70-requires-gate-test.sh
+          if [ ! -f "$T" ]; then
+            echo "::error::$T 不存在。正向完整性门禁没有回归测试 = data-url.js 那类事故会原样再犯。"
+            exit 1
+          fi
+          bash "$T"
+
       - name: 下载并解包 arm64 运行时
         run: bash scripts/01-extract.sh --arch arm64
 

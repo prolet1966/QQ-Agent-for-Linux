@@ -622,10 +622,59 @@ let core = null;
 let tray = null;
 let quitting = false;
 
+// ── 开机自启 ────────────────────────────────────────────────────────────
+//
+// ⚠️ Electron 的 app.setLoginItemSettings() **只支持 macOS / Windows**，Linux 上是空操作。
+//    原实现直接调它，于是「设置 → 开机自启」和托盘里那个同名勾选项在 Linux 上
+//    完全无效：勾了没反应、取消也没反应，而且不报任何错（静默失效最难查）。
+//    这里补上 Linux 的实现 —— 写 XDG autostart 条目
+//    `~/.config/autostart/qq-agent.desktop`，Cinnamon / GNOME / KDE / XFCE 通用。
+const AUTOSTART_FILE = 'qq-agent.desktop';
+
+function autostartPath() {
+  return path.join(app.getPath('home'), '.config', 'autostart', AUTOSTART_FILE);
+}
+
+/** 生成 autostart 条目。Exec 取当前进程真实可执行文件，避免硬编码安装路径。 */
+function autostartEntry() {
+  // 与桌面快捷方式保持一致：显式关掉 Electron 沙箱 —— Electron 33 的 seccomp 沙箱
+  // 在部分内核上会 SIGILL 杀掉渲染进程，界面直接起不来。
+  const exec = `env ELECTRON_DISABLE_SANDBOX=1 "${process.execPath}"`;
+  return [
+    '[Desktop Entry]',
+    'Type=Application',
+    'Name=QQ Agent',
+    'Comment=QQ 群 AI 机器人（开机自启）',
+    `Exec=${exec}`,
+    'Terminal=false',
+    'X-GNOME-Autostart-enabled=true',
+    'StartupNotify=false',
+    ''
+  ].join('\n');
+}
+
 function applyAutoStart() {
   if (!core) return;
-  const cfg = core.getConfig();
-  app.setLoginItemSettings({ openAtLogin: !!cfg.server?.autoStart });
+  const enabled = !!core.getConfig().server?.autoStart;
+
+  if (process.platform !== 'linux') {
+    app.setLoginItemSettings({ openAtLogin: enabled });
+    return;
+  }
+
+  const file = autostartPath();
+  try {
+    if (enabled) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, autostartEntry(), 'utf8');
+      logKey('autostart', `开机自启已启用：${file}`);
+    } else if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+      logKey('autostart', `开机自启已关闭：${file}`);
+    }
+  } catch (error) {
+    logCritical('autostart', `[开机自启] 写入失败：${describeError(error)}`);
+  }
 }
 
 function showWindow() {
@@ -661,7 +710,24 @@ function createTray() {
     { label: '退出', click: () => { console.log('[tray] 点击：退出'); quitting = true; app.quit(); } },
     // R69：正常退出要走 before-quit → core.stop() 清理链。万一那条链挂住（例如
     // 某个 await 不返回），用户就彻底没有出路了 —— 给一条跳过清理、立刻结束进程的兜底。
-    { label: '强制退出（跳过清理）', click: () => { logKey('tray', '点击：强制退出（app.exit）'); app.exit(0); } }
+    //
+    // ⚠️ 跳过清理 != 可以留下子进程：SnowLuma 是独立 node 进程，父进程被 app.exit() 硬结束
+    //    时它不会跟着死，会变成 ppid=1 的孤儿，继续占着 5099 端口与 hook 管道 ——
+    //    实测正是这条路径留下过一个活过好几轮启动的残留实例。所以同步把它带走。
+    {
+      label: '强制退出（跳过清理）',
+      click: () => {
+        logKey('tray', '点击：强制退出（app.exit）');
+        try {
+          const st = core?.snowlumaStatus?.();
+          if (st?.embedded && st.pid) {
+            process.kill(st.pid, 'SIGKILL');
+            logKey('tray', `已结束内置 SnowLuma（pid=${st.pid}）`);
+          }
+        } catch { /* ignore */ }
+        app.exit(0);
+      }
+    }
   ]));
   tray.on('double-click', () => showWindow());
 }
@@ -1051,6 +1117,12 @@ app.whenReady().then(async () => {
 // 清理链跑一半：锁文件可能残留、会话最后一次进度可能丢、SnowLuma 子进程可能变孤儿。
 // 正确做法：拦下这次退出，等 stop() 真正跑完再 app.quit()。
 let shuttingDown = false;
+// 清理链的硬上限。stop() 里的 await（abortAll / 落盘 / 关服务）只要有一个不返回，
+// 下面就不会再走到 app.quit()，进程永远卡在"点了退出但退不出去"的状态，
+// 用户只能去托盘选「强制退出」或开任务管理器 —— 这正是"关不掉"的成因之一。
+const STOP_TIMEOUT_MS = 8000;
+const EXIT_FALLBACK_MS = 3000;
+
 app.on('before-quit', (event) => {
   quitting = true;
   flushWindowState();                    // R66：真退出前把窗口几何落盘
@@ -1064,11 +1136,32 @@ app.on('before-quit', (event) => {
   shuttingDown = true;
   const t0 = Date.now();
   logKey('quit', 'before-quit：拦下退出，开始 core.stop()');
-  Promise.resolve()
-    .then(() => core.stop())
-    .then(() => logKey('quit', `core.stop() 完成（${Date.now() - t0}ms），继续 quit`))
+
+  const timeout = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      logKey('quit', `core.stop() 超过 ${STOP_TIMEOUT_MS}ms 未返回，放弃等待、强制退出`);
+      resolve('timeout');
+    }, STOP_TIMEOUT_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+
+  Promise.race([
+    Promise.resolve().then(() => core.stop()).then(() => 'done'),
+    timeout
+  ])
+    .then((how) => logKey('quit', `清理结束（${how}，${Date.now() - t0}ms），继续 quit`))
     .catch((error) => logCritical('quit', `[退出清理失败] ${describeError(error)}`))
-    .finally(() => app.quit());
+    .finally(() => {
+      app.quit();
+      // 第二道兜底：app.quit() 仍可能被某个窗口的 close 处理器拦下（例如缩托盘逻辑
+      // 在 quitting 标志没生效的边界情况下），所以再等 3 秒就 app.exit(0) ——
+      // 跳过清理，但保证进程一定结束，不留"点了退出却还在跑"的状态。
+      const t = setTimeout(() => {
+        logKey('quit', `app.quit() 后 ${EXIT_FALLBACK_MS}ms 仍未退出，强制 app.exit(0)`);
+        app.exit(0);
+      }, EXIT_FALLBACK_MS);
+      if (typeof t.unref === 'function') t.unref();
+    });
 });
 
 // R69：显式注册而不是交给 Electron 默认行为 —— 默认行为一样是退出（非 macOS），

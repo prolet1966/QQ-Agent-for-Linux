@@ -2007,7 +2007,26 @@ export function createApp({ log = console.log } = {}) {
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
     // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
     // 下次启动会读到完整文件。
-    try { snowlumaProc?.kill(); } catch { /* ignore */ }
+    //
+    // ⚠️ 只发一次 SIGTERM 是不够的：SnowLuma 是 Node 进程，正卡在等管道/落盘时
+    //    可能不理会信号。那样 QQ Agent 退了、它还活着，继续占着 5099 控制台端口
+    //    和 hook 管道 —— 下次启动直接撞端口，用户看到的是"重启后 SnowLuma 起不来"。
+    //    所以这里 SIGTERM 后用 exit 事件确认；2 秒仍未退出就 SIGKILL。
+    try {
+      const proc = snowlumaProc;
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGTERM');
+        const exited = await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(false), 2000);
+          proc.once('exit', () => { clearTimeout(timer); resolve(true); });
+        });
+        if (!exited) {
+          try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+          pushSnowlumaLog('SnowLuma 未在 2s 内退出，已强制结束（SIGKILL）。', 'stderr');
+        }
+        snowlumaProc = null;
+      }
+    } catch { /* ignore */ }
     // 便携 QQ：默认保留运行（避免误杀用户登录态），如需清理可在 UI 手动关闭
     // try { await stopPortableQQ(); } catch { /* ignore */ }
     // 释放单实例锁（下次启动才能再抢到）

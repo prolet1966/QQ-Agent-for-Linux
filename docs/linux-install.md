@@ -240,9 +240,22 @@ QQ Agent 启动时会自动拉起前两者，但如果你手动管理，务必�
 
 程序**绝不会按进程名批量杀 node** —— 那样会杀掉你机器上其它 Node 程序。
 
-### 4. 想开机自启？
+### 4. 开机自启（Linux 已内置）
 
-目前没有内置自启。用 systemd 用户服务：
+在**设置页勾选「开机自启」**（或托盘右键菜单里的同名勾选项）即可。程序会写一条 XDG autostart：
+
+```
+~/.config/autostart/qq-agent.desktop
+```
+
+Cinnamon / GNOME / KDE / XFCE 登录时都会读它；取消勾选即删除该文件。
+
+> ⚠️ **历史坑（已在 2026-10-06 修复）**：早期版本调的是 Electron 的
+> `app.setLoginItemSettings()`，而该 API **只支持 macOS / Windows**，Linux 上是空操作 ——
+> 勾了没反应、取消也没反应，而且不报任何错。现已改为写 XDG autostart 条目。
+
+无图形会话、或需要未登录也运行时，改用 systemd 用户服务（**两种方式不要同时开**，
+否则第二个实例会因单实例锁空转）：
 
 ```ini
 # ~/.config/systemd/user/qq-agent.service
@@ -264,7 +277,33 @@ systemctl --user daemon-reload
 systemctl --user enable --now qq-agent
 ```
 
-> `.deb` / `.rpm` 安装的实际路径请用 `dpkg -L qq-agent | grep -i bin` 确认。
+### 5. 「关不掉」是怎么回事
+
+**点窗口 ✕ 默认只把窗口缩到托盘，进程继续跑** —— 这是常驻机器人的预期行为。
+设置页的「关闭窗口时最小化到托盘」可以关掉它，关掉后 ✕ 就等于退出。
+
+真正的退出入口：
+
+1. **托盘图标右键 → 退出** —— 正常退出，会走完整清理
+2. **托盘图标右键 → 强制退出（跳过清理）** —— 清理链万一挂住时的兜底
+
+托盘图标找不到、或想从终端彻底停掉（含残留的 SnowLuma 与崩溃处理器）：
+
+```bash
+qq-agent-stop            # 彻底停止
+qq-agent-stop --dry-run  # 只报告将要结束哪些进程，不动手
+qq-agent-stop --with-qq  # 连 QQ 客户端一起停（会结束 QQ 登录态）
+```
+
+脚本按 PID 精确结束，**不会按进程名乱杀** node / Electron。它会连三类一起清：
+QQ Agent 主进程与全部 Electron 子进程、SnowLuma 协议端、以及 `--monitor-self` 的
+crashpad 崩溃处理器（后者在父进程被强杀后会变成 `ppid=1` 的孤儿）。
+
+> **为什么需要它**：正常退出走 `before-quit → core.stop()` 清理链，但
+> ① 清理链没有超时兜底（现已在 8s 后放弃等待、强制退出）；
+> ② 托盘「强制退出」跳过清理，会把 SnowLuma 丢成孤儿；
+> ③ 残留的 SnowLuma 会继续占着 5099 端口与 hook 管道，下次启动只能以"外部实例"复用。
+> 三者叠加就会出现"明明退出了，进程还在跑"。
 
 ---
 
