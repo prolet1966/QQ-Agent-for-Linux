@@ -34,15 +34,15 @@
 包文件名以实际构建为准（本次交付的三个包）：
 
 ```
-qq-agent-v0.4.4-amd64.deb          117 MB
-qq-agent-v0.4.4-x86_64.rpm         103 MB
-qq-agent-v0.4.4-x86_64.AppImage    150 MB
+qq-agent_0.4.7_amd64.deb          117 MB
+qq-agent-0.4.7-1.x86_64.rpm         103 MB
+QQ-Agent-0.4.7-x86_64.AppImage    150 MB
 ```
 
 ### Debian / Ubuntu（.deb）
 
 ```bash
-sudo apt install ./qq-agent-v0.4.4-amd64.deb
+sudo apt install ./qq-agent_0.4.7_amd64.deb
 ```
 
 `apt` 会自动装上运行所需的系统库。若报缺依赖，手动补齐：
@@ -59,7 +59,7 @@ sudo apt install -y libnss3 libgtk-3-0 libasound2t64 libgbm1 \
 ### RHEL / Fedora / Rocky（.rpm）
 
 ```bash
-sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm
+sudo dnf install ./qq-agent-0.4.7-1.x86_64.rpm
 ```
 
 依赖会被自动装好，**不需要手动补**。本包声明的 8 个依赖
@@ -74,8 +74,8 @@ sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm
 ### 任意发行版（AppImage）
 
 ```bash
-chmod +x qq-agent-v0.4.4-x86_64.AppImage
-./qq-agent-v0.4.4-x86_64.AppImage
+chmod +x QQ-Agent-0.4.7-x86_64.AppImage
+./QQ-Agent-0.4.7-x86_64.AppImage
 ```
 
 AppImage **不安装系统依赖**，需自行确保第二节列出的库都存在，
@@ -94,7 +94,7 @@ AppImage **不安装系统依赖**，需自行确保第二节列出的库都存�
 > sudo apt install libfuse2t64        # 22.04 及更早用 libfuse2
 >
 > # 解法二：不依赖 FUSE 运行（无需安装任何东西）
-> ./qq-agent-v0.4.4-x86_64.AppImage --appimage-extract-and-run
+> ./QQ-Agent-0.4.7-x86_64.AppImage --appimage-extract-and-run
 > ```
 >
 > 解法二会把内部 squashfs 解到一个临时目录再执行，首次启动慢约 1-2 秒。

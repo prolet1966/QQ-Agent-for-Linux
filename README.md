@@ -12,6 +12,20 @@
 
 ---
 
+## 版本口径（唯一真源）
+
+仓库里长期存在"Release 标题 0.4.6 / 包版本 0.4.4.1"这类不一致。现在统一为：
+
+| 位置 | 真源 |
+| --- | --- |
+| `scripts/lib.sh` 的 `APP_VERSION` | **唯一真源**，决定 deb/rpm/AppImage 文件名与包元数据 |
+| `package.json` 的 `version` | 同一个号（应用自报版本，`src/app.js` / `src/telemetry.js` 读取） |
+| git tag | `v<APP_VERSION>-<arch>`，如 `v0.4.7-linux` |
+| Release 标题 | `QQ Agent v<APP_VERSION> · <arch>` |
+
+改版本号只需要改 `APP_VERSION` 并同步 `package.json`；临时构建可用
+`QL_APP_VERSION=0.4.8 bash scripts/03-stage.sh ...` 覆盖，**不要**在别处另写死一个号。
+
 ## 📖 这是什么
 
 [QQ Agent](https://github.com/Kondius/qq-agent) 是一个接 OpenAI 兼容 API 的 QQ 群 AI 机器人，
@@ -40,17 +54,17 @@ uname -m
 
 | 格式 | 文件 | 安装 |
 | --- | --- | --- |
-| Debian / Ubuntu | `qq-agent-v0.4.4-amd64.deb` | `sudo apt install ./qq-agent-v0.4.4-amd64.deb` |
-| RHEL / Fedora / Rocky | `qq-agent-v0.4.4-x86_64.rpm` | `sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm` |
-| 通用 | `qq-agent-v0.4.4-x86_64.AppImage` | `chmod +x` 后直接运行 |
+| Debian / Ubuntu | `qq-agent_0.4.7_amd64.deb` | `sudo apt install ./qq-agent_0.4.7_amd64.deb` |
+| RHEL / Fedora / Rocky | `qq-agent-0.4.7-1.x86_64.rpm` | `sudo dnf install ./qq-agent-0.4.7-1.x86_64.rpm` |
+| 通用 | `QQ-Agent-0.4.7-x86_64.AppImage` | `chmod +x` 后直接运行 |
 
 ### arm64（Apple Silicon / 树莓派 4+ / ARM 服务器）
 
 | 格式 | 文件 | 安装 |
 | --- | --- | --- |
-| Debian / Ubuntu | `qq-agent_0.4.4_arm64.deb` | `sudo apt install ./qq-agent_0.4.4_arm64.deb` |
-| RHEL / Fedora / Rocky | `qq-agent-0.4.4-1.aarch64.rpm` | `sudo dnf install ./qq-agent-0.4.4-1.aarch64.rpm` |
-| 通用 | `QQ-Agent-0.4.4-aarch64.AppImage` | `chmod +x` 后直接运行 |
+| Debian / Ubuntu | `qq-agent_0.4.7_arm64.deb` | `sudo apt install ./qq-agent_0.4.7_arm64.deb` |
+| RHEL / Fedora / Rocky | `qq-agent-0.4.7-1.aarch64.rpm` | `sudo dnf install ./qq-agent-0.4.7-1.aarch64.rpm` |
+| 通用 | `QQ-Agent-0.4.7-aarch64.AppImage` | `chmod +x` 后直接运行 |
 
 > arm64 三个包合计约 370 MB（单架构）。
 > 校验和见各 Release 的 `SHA256SUMS.txt`。
@@ -63,19 +77,19 @@ uname -m
 ```bash
 # ── x86_64 ──
 # Debian / Ubuntu
-sudo apt install ./qq-agent-v0.4.4-amd64.deb && qq-agent
+sudo apt install ./qq-agent_0.4.7_amd64.deb && qq-agent
 # RHEL / Fedora
-sudo dnf install ./qq-agent-v0.4.4-x86_64.rpm && qq-agent
+sudo dnf install ./qq-agent-0.4.7-1.x86_64.rpm && qq-agent
 # 任意发行版（AppImage）
-chmod +x qq-agent-v0.4.4-x86_64.AppImage && ./qq-agent-v0.4.4-x86_64.AppImage
+chmod +x QQ-Agent-0.4.7-x86_64.AppImage && ./QQ-Agent-0.4.7-x86_64.AppImage
 
 # ── arm64（文件名不同，注意区分）──
 # Debian / Ubuntu
-sudo apt install ./qq-agent_0.4.4_arm64.deb && qq-agent
+sudo apt install ./qq-agent_0.4.7_arm64.deb && qq-agent
 # RHEL / Fedora
-sudo dnf install ./qq-agent-0.4.4-1.aarch64.rpm && qq-agent
+sudo dnf install ./qq-agent-0.4.7-1.aarch64.rpm && qq-agent
 # 任意发行版（AppImage）
-chmod +x QQ-Agent-0.4.4-aarch64.AppImage && ./QQ-Agent-0.4.4-aarch64.AppImage
+chmod +x QQ-Agent-0.4.7-aarch64.AppImage && ./QQ-Agent-0.4.7-aarch64.AppImage
 ```
 
 > **务必用 `apt install ./文件`（带 `./`）**，apt 才会自动补依赖；
@@ -280,7 +294,7 @@ arm64 **不走上面的 WSL 路径**。原因有两个，都很硬：
 
 ```bash
 # 打 tag 直接触发，不必先合并
-git tag v0.4.4-arm64 && git push origin v0.4.4-arm64
+git tag v0.4.7-arm64 && git push origin v0.4.7-arm64
 ```
 
 工作流会跑完 19 步：工具链 → 隐私自检 → 解包 arm64 运行时 → 组装 → 架构审计 →
