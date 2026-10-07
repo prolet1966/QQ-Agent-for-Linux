@@ -131,11 +131,17 @@ PIXMAP_DIR="/usr/share/pixmaps"
 #    `data/` 与 `data-<profile>/`，又不再误伤 node_modules 深处；
 #    顺带修掉「node_modules/<pkg>/data/ 这类嵌套 data 目录被误排」的同类隐患。
 EXCLUDE_PATTERNS=(
-  # data：运行时数据，**故意不锚定**（云端既有做法）—— 任意深度的 data/ 都算运行期状态。
+  # data：运行时数据，**故意不锚定** —— 任意深度的 data/ 目录都算运行期状态。
+  #   注意它只能写成没有通配符的 "data"：一旦写成 "data-*"（未锚定，无斜杠），
+  #   tar 会按**路径段**去匹配，于是连 node_modules/undici/lib/web/fetch/data-url.js
+  #   一起排掉 —— 那正是云端 28f2198 这次提交在修的事故，我 2026-10-07 又复现了一次
+  #   （stage 组装被 REQUIRED_PRESENT 正面拦下，见下）。
   "data"
-  # data-*：多实例数据目录（data-2 / data-3 …）里就是 config.json（明文 API Key），
-  #   漏排等于把密钥打进发布包。云端某次提交把它删掉了，这里**加回来**。
-  "data-*"
+  # 多实例数据目录 data-2 / data-3 … 里就是 config.json（明文 API Key），漏排等于把
+  # 密钥打进发布包。**必须带 ./ 锚定**：带斜杠的 pattern 按完整路径匹配，
+  # 只会命中根级的 ./data-2，不会碰到深处的 data-url.js。
+  "./data"
+  "./data-*"
   "community.key"
   "community.key.example"
   "snowluma/config"
@@ -643,7 +649,13 @@ QL_GH_MIRROR="${QL_GH_MIRROR-https://gh-proxy.com/}"
 #    再次漂移时无需改脚本：QL_APPIMAGETOOL_SHA256_X86_64=<实测哈希> bash scripts/06-....sh
 APPIMAGETOOL_SHA256_x86_64="95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6"
 APPIMAGETOOL_SHA256_aarch64="1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe"
-TYPE2RUNTIME_SHA256_x86_64="1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
+# ⚠️ type2-runtime 与 appimagetool 一样挂在 **continuous** 标签下，上游会定期重建，
+#    摘要会周期性失效。2026-10-07 实测：旧 pin 1cc49bcf…（来自 647a2e5）已失效，
+#    实际下载到的是 156f4bdb…（10-06 与 10-07 两次下载逐字节一致，且用它产出的
+#    AppImage 通过了载荷自检 + unsquashfs 独立校验）。这里按**实测值**更正。
+#    对照：Electron / SnowLuma 的 pin 仍然匹配 ⇒ 不是下载链路被篡改。
+#    再次漂移无需改脚本：QL_TYPE2RUNTIME_SHA256_X86_64=<实测哈希> bash scripts/06-....sh
+TYPE2RUNTIME_SHA256_x86_64="156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074"
 TYPE2RUNTIME_SHA256_aarch64="b4ff0030242d0c3bb12ce40541828303cf167493f4793456f0436edd6255c39d"
 
 appimagetool_name() { echo "appimagetool-${APPIMAGE_ARCH}.AppImage"; }
