@@ -44,16 +44,17 @@ function updateReadinessDots(s) {
   const qqRunning = !!qq.running;
   const slRunning = !!s?.snowluma?.running;
   const obConnected = !!s?.onebot?.connected;
+  const external = s?.snowluma?.mode === 'external';
   const cfg = state.config || {};
   const cfgReady = !!(cfg.api?.baseUrl && cfg.api?.model && (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty));
 
   // 圆点 0：QQ 内核
-  dots[0].className = 'rdot' + (qqRunning ? ' on' : '');
-  dots[0].title = qqRunning ? 'QQ 内核运行中' : 'QQ 内核未运行（点击前往启动）';
+  dots[0].className = 'rdot' + ((external ? obConnected : qqRunning) ? ' on' : '');
+  dots[0].title = external ? (obConnected ? 'QQ 由外部协议端管理，OneBot 已连接' : 'QQ 由外部协议端管理，请在外部完成登录') : qqRunning ? 'QQ 内核运行中' : 'QQ 内核未运行（点击前往启动）';
 
   // 圆点 1：SnowLuma
-  dots[1].className = 'rdot' + (slRunning ? ' on' : '');
-  dots[1].title = slRunning ? 'SnowLuma 运行中' : 'SnowLuma 未运行（点击前往启动）';
+  dots[1].className = 'rdot' + ((external ? obConnected : slRunning) ? ' on' : '');
+  dots[1].title = external ? (obConnected ? '外部协议端已连接' : '等待外部协议端连接') : slRunning ? 'SnowLuma 运行中' : 'SnowLuma 未运行（点击前往启动）';
 
   // 圆点 2：OneBot
   dots[2].className = 'rdot' + (obConnected ? ' on' : (slRunning ? ' wait' : ''));

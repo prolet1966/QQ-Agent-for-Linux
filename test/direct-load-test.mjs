@@ -12,9 +12,9 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
-const APP = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // 依赖 electron 的模块不能直接 import（会报 cannot find electron）。
 // loadPlugins 本身不依赖 electron —— 但 skillManager 链路上可能间接依赖，
@@ -28,7 +28,7 @@ try {
 } catch (err) {
   console.error('❌ 无法导入 plugin-loader.js');
   console.error('   ' + (err?.message ?? err));
-  console.error('   提示：本脚本必须放在 app 目录内运行（node test/direct-load-test.mjs）');
+  console.error('   提示：请在项目目录运行（node test/direct-load-test.mjs）');
   process.exit(2);
 }
 
@@ -42,8 +42,10 @@ try {
 
 console.log('############ 插件/技能加载结果（直连加载器）############');
 console.log('  APP:', APP);
-console.log('  插件目录:', fs.readdirSync(path.join(APP, 'plugins')).length, '个');
-console.log('  技能目录:', fs.readdirSync(path.join(APP, 'skills')).length, '个');
+const pluginsDir = path.join(APP, 'plugins');
+const skillsDir = path.join(APP, 'skills');
+console.log('  插件目录:', fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir).length : 0, '个（服务器包由商城按需安装）');
+console.log('  技能目录:', fs.existsSync(skillsDir) ? fs.readdirSync(skillsDir).length : 0, '个（服务器包由商城按需安装）');
 console.log('');
 
 const logs = [];

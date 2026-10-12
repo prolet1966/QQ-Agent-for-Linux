@@ -13,7 +13,9 @@
 //     前端传什么都没用 —— 这是"技能页输插件口令也装进插件目录"的保证）
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, DATA_DIR, getConfig } from './config.js';
+import { DATA_DIR } from './config.js';
+import { SKILLS_DIR, PLUGINS_DIR, prepareExtensionRoots } from './plugin-loader.js';
+import { skillManager } from './skills/manager.js';
 import { logger } from './logger.js';
 
 export const MARKET_API_BASE = 'https://www.kondius.cn/api/community';
@@ -123,7 +125,13 @@ export async function verifyAccount(token) {
  * @returns 服务器响应 { ok, item, renamedTo? }
  */
 export async function publishModule({ kind, id, displayName, description, token }) {
-  const dir = path.join(ROOT, kind === 'plugin' ? 'plugins' : 'skills', id);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(String(id || ''))) throw new Error('扩展目录名不合法');
+  const baseDir = kind === 'plugin' ? PLUGINS_DIR : SKILLS_DIR;
+  const installed = skillManager.registry.get(id);
+  const dir = installed?.dir || path.join(baseDir, id);
+  const rel = path.relative(baseDir, path.resolve(dir));
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('拒绝发布扩展目录以外的内容');
+  if (fs.lstatSync(dir).isSymbolicLink()) throw new Error('拒绝发布符号链接目录');
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
     throw new Error(`目录不存在：${dir}`);
   }
@@ -147,20 +155,25 @@ export async function publishModule({ kind, id, displayName, description, token 
 /** 把目录打成 zip（Buffer）。entry.json 不存在于本地目录，无需剔除。 */
 async function zipDirectory(dir) {
   const files = [];
+  let total = 0;
   const walk = (d, rel = '') => {
     for (const name of fs.readdirSync(d)) {
       const fp = path.join(d, name);
-      const st = fs.statSync(fp);
+      const st = fs.lstatSync(fp);
+      if (st.isSymbolicLink()) throw new Error(`拒绝打包符号链接：${name}`);
       if (st.isDirectory()) walk(fp, rel ? `${rel}/${name}` : name);
-      else files.push({ fp, rel: rel ? `${rel}/${name}` : name });
+      else {
+        total += st.size;
+        if (total > 32 * 1024 * 1024) throw new Error('解压后总大小超过 32MB');
+        if (files.length >= 100) throw new Error('文件数量过多（>100）');
+        files.push({ fp, rel: rel ? `${rel}/${name}` : name });
+      }
     }
   };
   walk(dir);
   // 前置校验（与后端 validate_zip 同款）：本地先拦，省一次上传
   if (files.length > 100) throw new Error('文件数量过多（>100）');
-  let total = 0;
   for (const f of files) {
-    total += fs.statSync(f.fp).size;
     if (/\.(exe|dll|bat|cmd|ps1|vbs|sh)$/i.test(f.rel)) throw new Error(`禁止打包可执行文件：${f.rel}`);
   }
   if (total > 32 * 1024 * 1024) throw new Error('解压后总大小超过 32MB');
@@ -263,29 +276,53 @@ export async function verifyInstallCodes(codes) {
 
 /**
  * 按口令下载并安装到本地 skills/ 或 plugins/。
- * 类型路由由**服务器返回的 type** 决定（skill.json→skill / plugin.json→plugin），
- * 前端/调用方无法干预 —— 即使在技能页输入了插件的口令，也装进 plugins/。
+ * 类型由下载包的清单决定（skill.json→skill / plugin.json→plugin）。
+ * 前端 entry 仅作提示，不能把插件安装到错误的目录。
  *
  * @param {object} o { code, verified(校验阶段拿到的条目信息) }
  * @returns {Promise<{ok, kind, id, dir}>}
  */
 export async function installByCode({ code, verified }) {
+  prepareExtensionRoots();
   const entry = verified && verified.ok ? verified : null;
-  const type = String(entry?.type || '').toLowerCase() === 'plugin' ? 'plugin' : 'skill';
-  // 先下载（没传 verified 也重新校验一次拿 type —— 不信任何本地猜测）
+  const kindHint = String(entry?.type || '').toLowerCase() === 'plugin' ? 'plugin' : 'skill';
   const ident = entry?.id;
   const res = await fetch(`${MARKET_API_BASE}/install/${encodeURIComponent(String(code).trim().toUpperCase())}/download`, {
     signal: AbortSignal.timeout(120000)
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
+    const text = await readBoundedDownload(res).then((bytes) => bytes.toString('utf8')).catch(() => '');
     throw new Error(`下载失败：HTTP ${res.status} ${text.slice(0, 120)}`);
   }
-  const zipBuffer = Buffer.from(await res.arrayBuffer());
-  if (zipBuffer.length > MAX_ZIP_BYTES) throw new Error('安装包超过 8MB 上限');
-  const { unzipToModuleDir, validateZipStructure } = await import('./zip-install.js');
-  validateZipStructure(zipBuffer);
-  const dirName = await unzipToModuleDir(zipBuffer, { root: ROOT, type, preferId: ident });
-  log('info', `口令 ${code} 安装完成：${type}s/${dirName}`);
-  return { ok: true, kind: type, id: dirName, dir: path.join(ROOT, type === 'plugin' ? 'plugins' : 'skills', dirName) };
+  const zipBuffer = await readBoundedDownload(res);
+  const { importZip } = await import('./module-import.js');
+  const installed = await importZip(zipBuffer, { kind: kindHint, preferId: ident });
+  log('info', `口令 ${code} 安装完成：${installed.kind}s/${installed.id}`);
+  return { ok: true, kind: installed.kind, id: installed.id, dir: installed.dir };
+}
+
+/** 达到限制即取消下载，避免先把任意大小的响应装进内存。 */
+export async function readBoundedDownload(response, maxBytes = MAX_ZIP_BYTES) {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error('安装包超过 8MB 上限');
+  }
+  if (!response.body) throw new Error('下载响应为空');
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error('安装包超过 8MB 上限');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks, size);
+  } finally { reader.releaseLock(); }
 }

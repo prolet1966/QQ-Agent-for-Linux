@@ -136,13 +136,17 @@ export class SkillManager {
 
   isLoaded(id) {
     const skill = this.registry.get(id);
-    return Boolean(skill) && skill.loadError == null;
+    return Boolean(skill) && skill.loadError == null && skill.codeLoaded !== false;
   }
 
   isEnabled(id) {
     const skill = this.registry.get(id);
     const dflt = skill?.manifest?.enabledByDefault !== false;
     return isSkillEnabledInConfig(id, dflt);
+  }
+
+  isEnabledManifest(manifest) {
+    return isSkillEnabledInConfig(manifest.id, manifest.enabledByDefault !== false);
   }
 
   /**
@@ -205,6 +209,9 @@ export class SkillManager {
    * 这里是所有"这个功能能不能用"判断的唯一出口。
    */
   isActive(id, context = {}, visited = new Set()) {
+    if (this.registry.has(id) && !this.isEnabled(id)) {
+      return { active: false, code: SKILL_ERROR.DISABLED, reason: skillErrorText(SKILL_ERROR.DISABLED) };
+    }
     if (!this.isLoaded(id)) {
       const avail = this.isAvailable(id, context, visited);
       return { active: false, code: avail.code || SKILL_ERROR.NOT_LOADED, reason: avail.reason || skillErrorText(SKILL_ERROR.NOT_LOADED) };
@@ -251,7 +258,7 @@ export class SkillManager {
       kind: skill.kind || null,
       dir: skill.relDir || '',
       hasSettings: Object.keys(m.settings || {}).length > 0 || Object.keys(m.configSchema || {}).length > 0,
-      loaded: !skill.loadError,
+      loaded: this.isLoaded(id),
       // loadError：本次加载失败的具体原因（清单/入口/setup 抛错）。
       // UI 据此渲染"加载失败"徽章与红色原因行 —— 失败条目现在也会注册进表，
       // 不再表现为"条目凭空消失"。
@@ -476,8 +483,8 @@ export class SkillManager {
     return {
       total: list.length,
       active: list.filter((s) => s.active).length,
-      disabled: list.filter((s) => s.loaded && !s.enabled).length,
-      broken: list.filter((s) => !s.loaded).length,
+      disabled: list.filter((s) => !s.enabled && !s.loadError).length,
+      broken: list.filter((s) => s.loadError || (s.enabled && !s.loaded)).length,
       capabilities: this.capabilities.list().sort()
     };
   }

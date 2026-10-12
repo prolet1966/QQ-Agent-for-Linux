@@ -1,0 +1,33 @@
+name: server-x64
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*-server']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
+          cache: npm
+      - run: npm ci --omit=dev --omit=optional --ignore-scripts
+      - run: npm test
+      - run: bash -n scripts/server/*.sh
+      - run: npm run build:server -- --output /tmp/qqa-server-first
+      - run: |
+          mkdir /tmp/qqa-server-unpack
+          tar -xzf /tmp/qqa-server-first/qq-agent-server-*.tar.gz -C /tmp/qqa-server-unpack
+          node /tmp/qqa-server-unpack/qq-agent-server/scripts/server/verify-release.mjs /tmp/qqa-server-unpack/qq-agent-server
+          node scripts/verify-no-missing-requires.mjs /tmp/qqa-server-unpack/qq-agent-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qq-agent-server-node22-x64
+          path: /tmp/qqa-server-first/*
+          if-no-files-found: error

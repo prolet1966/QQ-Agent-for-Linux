@@ -10,6 +10,7 @@ import { inflateRawSync } from 'node:zlib';
 const BANNED_EXT = /\.(exe|dll|bat|cmd|ps1|vbs|sh)$/i;
 const MAX_FILES = 100;
 const MAX_TOTAL = 32 * 1024 * 1024;
+export const MAX_ZIP_BYTES = 8 * 1024 * 1024;
 
 /**
  * 结构校验（抛错 = 拒绝安装）：
@@ -51,12 +52,12 @@ export async function unzipToModuleDir(buffer, { root, type, preferId = '' }) {
   if (relNames.some((n) => !n)) throw new Error('安装包结构异常（剥掉根目录后有条目为空）');
 
   // 落地目录名：优先 zip 根目录名，其次 preferId
-  let dirName = strip ? firstSeg : (preferId || 'module');
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(dirName)) dirName = preferId || 'module';
+  const validId = (v) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(String(v || ''));
+  const dirName = strip && validId(firstSeg) ? firstSeg : (validId(preferId) ? preferId : 'module');
   // 冲突递增
   let finalName = dirName;
-  for (let n = 1; n <= 100; n++) {
-    if (!fs.existsSync(path.join(baseDir, finalName))) break;
+  for (let n = 1; fs.existsSync(path.join(baseDir, finalName)); n++) {
+    if (n > 100) throw new Error('同名扩展过多，请先清理重复安装');
     finalName = `${dirName}_${n}`;
   }
   const target = path.join(baseDir, finalName);
@@ -80,6 +81,19 @@ export async function unzipToModuleDir(buffer, { root, type, preferId = '' }) {
  *  导出给本地导入（src/module-import.js）复用 —— 那里要在解压**之前**先看一眼
  *  包里有没有 plugin.json/skill.json，才能决定装进哪一页。 */
 export function parseZip(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 22) throw new Error('不是有效的 zip 文件');
+  if (buffer.length > MAX_ZIP_BYTES) throw new Error('安装包超过 8MB 上限');
+  const checked = (off, size) => {
+    if (!Number.isSafeInteger(off) || off < 0 || off + size > buffer.length) throw new Error('zip 数据截断或偏移损坏');
+  };
+  const safeName = (name) => {
+    const normalized = name.replace(/\\/g, '/');
+    if (!normalized || normalized.includes('\0') || normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized) || normalized.split('/').includes('..')) {
+      throw new Error(`安装包包含非法路径：${name}`);
+    }
+    if (BANNED_EXT.test(normalized)) throw new Error(`安装包包含禁止的文件类型：${name}`);
+    return normalized;
+  };
   const sig = (off) => buffer.readUInt32LE(off);
   // 定位 EOCD（22 字节，从尾部向前扫，允许有注释）
   let eocd = -1;
@@ -88,32 +102,46 @@ export function parseZip(buffer) {
   }
   if (eocd < 0) throw new Error('不是有效的 zip 文件');
   const count = buffer.readUInt16LE(eocd + 10);
+  if (count > MAX_FILES) throw new Error(`文件数量过多（${count} > ${MAX_FILES}）`);
+  if (buffer.readUInt16LE(eocd + 4) || buffer.readUInt16LE(eocd + 6)) throw new Error('不支持分卷 zip');
   let ptr = buffer.readUInt32LE(eocd + 16);
 
   const out = [];
+  let expandedTotal = 0;
   for (let i = 0; i < count; i++) {
+    checked(ptr, 46);
     if (sig(ptr) !== 0x02014b50) throw new Error('zip 中央目录损坏');
+    const flags = buffer.readUInt16LE(ptr + 8);
+    if (flags & 1) throw new Error('不支持加密 zip');
     const method = buffer.readUInt16LE(ptr + 10);
     const compSize = buffer.readUInt32LE(ptr + 20);
+    const uncompSize = buffer.readUInt32LE(ptr + 24);
     const nameLen = buffer.readUInt16LE(ptr + 28);
     const extraLen = buffer.readUInt16LE(ptr + 30);
     const commentLen = buffer.readUInt16LE(ptr + 32);
     const localOff = buffer.readUInt32LE(ptr + 42);
-    const name = buffer.toString('utf8', ptr + 46, ptr + 46 + nameLen);
+    checked(ptr + 46, nameLen + extraLen + commentLen);
+    const name = safeName(buffer.toString('utf8', ptr + 46, ptr + 46 + nameLen));
 
     // 目录条目（以 / 结尾）跳过
     if (!name.endsWith('/')) {
+      if (uncompSize > MAX_TOTAL - expandedTotal) throw new Error('解压后总大小超过 32MB');
       // 本地头：定位到实际数据
+      checked(localOff, 30);
       if (sig(localOff) !== 0x04034b50) throw new Error('zip 本地头损坏');
       const lNameLen = buffer.readUInt16LE(localOff + 26);
       const lExtraLen = buffer.readUInt16LE(localOff + 28);
       const dataStart = localOff + 30 + lNameLen + lExtraLen;
+      checked(dataStart, compSize);
       const raw = buffer.subarray(dataStart, dataStart + compSize);
       let data;
       if (method === 0) data = Buffer.from(raw);
-      else if (method === 8) data = inflateRawSync(raw);
+      else if (method === 8) data = inflateRawSync(raw, { maxOutputLength: Math.max(1, MAX_TOTAL - expandedTotal) });
       else throw new Error(`不支持的压缩方式（method=${method}）：${name}`);
-      out.push({ name: name.replace(/\\/g, '/'), data });
+      if (data.length !== uncompSize) throw new Error(`zip 文件大小不一致：${name}`);
+      expandedTotal += data.length;
+      if (expandedTotal > MAX_TOTAL) throw new Error('解压后总大小超过 32MB');
+      out.push({ name, data });
     }
     ptr += 46 + nameLen + extraLen + commentLen;
   }

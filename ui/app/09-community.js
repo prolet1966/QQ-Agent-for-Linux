@@ -713,7 +713,7 @@ function openAddModuleModal(kind) {
   const overlay = modelModalShell({
     head: `添加${name}`,
     body: `
-      <div class="hint" style="margin-bottom:12px">三种来路：从市场捞现成的、把 zip 或文件夹丢进来、或者自己造一个。<span class="muted">（也可以直接把文件拖到${name}页里，会自动装）</span></div>
+      <div class="hint" style="margin-bottom:12px">从商城选择需要的${name}，或导入 zip 安装包。也可以让 AI 工具制作新的安装包。</div>
       <div class="addmod-stack">
         <button class="addmod-big" id="addmod-market">
           <span class="addmod-label">看看${name}市场</span>
@@ -721,11 +721,11 @@ function openAddModuleModal(kind) {
         </button>
         <button class="addmod-big addmod-import" id="addmod-import">
           <span class="addmod-label">导入本地文件</span>
-          <span class="addmod-hover-label">zip 或文件夹</span>
+          <span class="addmod-hover-label">选择 zip 安装包</span>
         </button>
         <button class="addmod-big addmod-diy" id="addmod-diy">
           <span class="addmod-label">自己造个${name}</span>
-          <span class="addmod-hover-label">我去牛逼</span>
+          <span class="addmod-hover-label">制作安装包</span>
         </button>
       </div>`,
     foot: `<button class="btn" id="addmod-cancel">算了</button>`
@@ -1098,14 +1098,6 @@ async function openMarketUploadModal(kind, moduleId) {
  * dataDir 形如 <根>/data 或 <根>/data-2（第二实例）——去掉末尾的 data 段。
  * 拿不到（status 未加载等）返回空串，提示词里走"询问用户"兜底。
  */
-function detectProjectRoot() {
-  const dir = String(state.status?.dataDir || '');
-  if (!dir) return '';
-  const norm = dir.replace(/[\\/]+$/, '');
-  const m = /[\\/]data(-\d+)?$/i.exec(norm);
-  return m ? norm.slice(0, m.index) : norm;
-}
-
 function buildModuleCreationPrompt(kind) {
   const isSkill = kind === 'skill';
   // 引导 AI 从"用户点的是技能页还是插件页"出发，但**允许 AI 推翻**——
@@ -1113,20 +1105,11 @@ function buildModuleCreationPrompt(kind) {
   const entryHint = isSkill
     ? '用户是从「技能」页点进来的（他大概率想要一个技能，但也可能点错了，需要你判定）'
     : '用户是从「插件」页点进来的（他大概率想要一个插件，但也可能点错了，需要你判定）';
-  // 项目根：拿到了就直接给 AI 绝对路径（省掉 AI 全盘摸索）；拿不到就让 AI 问。
-  const root = detectProjectRoot();
-  const locateBlock = root
-    ? `这个项目就安装在我电脑的这个文件夹里（直接用，不用再找）：
-${root}
-文档在它下面的 doc/extend_development/ 里，技能/插件目录分别是它下面的 skills/ 和 plugins/。`
-    : `先问我一句"QQ Agent 装在哪个文件夹"（我不知道的话，就找桌面或开始菜单里的「QQ Agent」快捷方式 → 右键 → 打开文件所在位置）。拿到项目文件夹后再继续。`;
-  return `我电脑上有一个叫「QQ Agent」的 QQ 机器人项目，我想给它加一个新功能，但我不会写代码。请你帮我从头到尾做完，包括把文件放到位。下面是给你的完整工作说明：
-
-【第零步：定位项目】
-${locateBlock}
+  return `我在使用「QQ Agent」QQ 机器人，想增加一个功能。请帮我制作能从控制台导入的 zip 安装包。
 
 【第一步：先读懂文档】
-读取项目里 doc/extend_development/ 目录下的这些文档：
+项目源码：https://github.com/prolet1966/QQ-Agent-for-Linux
+读取源码中 doc/extend_development/ 目录下的这些文档（已有本地源码时直接读取本地文件）：
 - skill-development.md（技能开发规范）
 - plugin-development.md（插件开发规范）
 - skill-reference.md（API 完整参考，必读）
@@ -1140,12 +1123,13 @@ ${entryHint}。
 - 然后按文档的判定方法决定做成技能（skills/ 目录）还是插件（plugins/ 目录），并告诉我你的判定和理由；
 - 我说不上来的时候，用文档里的"三问判断法"引导我。
 
-【第三步：生成并落盘】
+【第三步：制作安装包】
 确定类型后：
-1. 按对应文档的规范，生成完整可运行的文件（技能是 skills/<id>/skill.json + index.js，插件是 plugins/<id>/plugin.json + index.js）；
+1. 按对应文档的规范，生成完整可运行的文件（技能是 <id>/skill.json + index.js，插件是 <id>/plugin.json + index.js）；
 2. <id> 用一个简短的小写英文标识（如 my-weather），不要用中文；
-3. 把文件直接写到项目对应的目录里去（技能 → skills/<id>/，插件 → plugins/<id>/）。这个项目开着热重载，文件落盘后会自动加载，不需要我重启或刷新；
-4. 写完后告诉我：生成了什么、放在哪、回到 QQ Agent 的「技能」或「插件」页签应该看到什么。
+3. 使用 Skill API，避免桌面专属依赖；所有定时器、监听器、子进程都必须在 deactivate/dispose 中清理。清单建议 enabledByDefault:false，让用户安装后手动启用；
+4. 把生成的文件打包成 zip，排除 node_modules、密钥和个人数据，提供下载文件；
+5. 告诉我从 QQ Agent 的「技能」或「插件」页点击「＋ 添加」→「导入本地文件」选择该 zip，然后启用。服务器版扩展存放在数据目录 extensions/ 下，由控制台管理安装，不依赖桌面快捷方式或修改安装目录。
 
 【如果出了问题】
 生成后如果 QQ Agent 控制台的技能/插件页显示加载失败，把页面上显示的错误原因原样发给我，我来贴给你修（文档里有常见失败对照表）。
@@ -1163,8 +1147,8 @@ function openCreateModuleGuide(kind) {
       <div class="hint" style="margin-bottom:12px">
         不会写代码？没问题。把下面这段提示词复制出来，粘贴到<b>任何</b>一个 AI 桌面工具里
         （ZCode、WorkBuddy、Qoder、DeepSeek Harness 之类的都行），
-        然后告诉它你想要什么功能——它会问清楚需求、读文档、把做好的${name}直接放进项目里，
-        你回到这个页面点「刷新」就能看到。<b>全程不需要你碰任何文件夹。</b>
+        然后告诉它你想要什么功能，它会读文档并生成 zip 安装包。
+        下载后，从这个页面的「＋ 添加」→「导入本地文件」选择安装包即可，服务器和桌面版都能使用。
       </div>
       <pre class="guide-code" id="cmg-prompt" style="max-height:220px;overflow:auto;user-select:all;white-space:pre-wrap;word-break:break-all">${esc(prompt)}</pre>
       <div class="hint" id="cmg-copied" style="min-height:18px;color:var(--green)"></div>`,

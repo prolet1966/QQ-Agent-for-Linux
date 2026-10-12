@@ -1,5 +1,13 @@
 // 〔存档 / 用量〕——M9 拆分第 5 段
 'use strict';
+let chatArchiveRevision = 0;
+let chatArchiveInflight = null;
+function chatArchiveScope() { return state.activeInst || null; }
+function mergeArchiveMessages(...pages) {
+  const unique = new Map();
+  for (const page of pages) for (const message of page) unique.set(String(message.id), message);
+  return [...unique.values()];
+}
 // ── 存档视图 ──
 async function loadChats({ quiet = false } = {}) {
   try {
@@ -57,26 +65,87 @@ async function selectChat(key) {
  *    用户辛辛苦苦滚出来的内容会瞬间被刷回前 500 条，滚动位置也回到顶部
  *    —— 表现为"明明滚下去了，过一会儿自己弹回上面"。
  */
-async function loadChatMessages(key, { keepView = false } = {}) {
-  try {
-    const data = await api(`/api/chats/${key.replace(':', '_')}/messages?limit=100000`);
-    // 期间用户可能切走了会话，那就别覆盖当前视图
-    if (state.currentChatKey !== key) return;
-    state.chatMessages = data.messages || [];
-
-    if (keepView && (state.chatMsgLimit || 0) > 0 && $('#chat-msg-body')) {
-      // 只更新表格内容：分页不变、滚动位置不变
-      updateChatMessagesBody(true);
-    } else {
-      // 切换会话：重置分页并从第一页开始
-      state.chatMsgLimit = CHAT_MSG_PAGE;
-      renderChatMessages();
+function loadChatMessages(key, { keepView = false } = {}) {
+  const scope = chatArchiveScope();
+  if (keepView && chatArchiveInflight?.key === key && chatArchiveInflight.scope === scope) return chatArchiveInflight.promise;
+  const revision = ++chatArchiveRevision;
+  const preserve = keepView && state.chatArchiveKey === key && state.chatArchiveScope === scope;
+  const target = preserve ? Math.max(1, (state.chatMessages || []).length) : CHAT_MSG_PAGE;
+  const promise = (async () => {
+    try {
+      const pages = [];
+      let offset = 0; let total = 0; let hasMore = false;
+      while (offset < target) {
+        const limit = Math.min(500, target - offset);
+        const data = await api(`/api/chats/${key.replace(':', '_')}/messages?limit=${limit}&offset=${offset}`);
+        if (state.currentChatKey !== key || chatArchiveScope() !== scope || revision !== chatArchiveRevision) return;
+        const messages = data.messages || [];
+        pages.push(messages);
+        total = Number(data.total) || messages.length;
+        const next = Number(data.nextOffset) || offset + messages.length;
+        hasMore = data.hasMore === true;
+        if (!messages.length || next <= offset) { hasMore = false; break; }
+        offset = next;
+        // A short byte-limited page is a complete first screen. Do not eagerly
+        // fetch hundreds of large messages merely to fill a row-count target.
+        if (!hasMore || !preserve || messages.length < limit) break;
+      }
+      state.chatMessages = mergeArchiveMessages(...pages);
+      state.chatArchiveKey = key; state.chatArchiveScope = scope;
+      state.chatMessageTotal = total; state.chatNextOffset = offset; state.chatHasMore = hasMore;
+      if (preserve && (state.chatMsgLimit || 0) > 0 && $('#chat-msg-body')) {
+        updateChatMessagesBody(true);
+      } else {
+        state.chatMsgLimit = CHAT_MSG_PAGE;
+        renderChatMessages();
+      }
+    } catch (e) {
+      if (state.currentChatKey !== key || chatArchiveScope() !== scope || revision !== chatArchiveRevision) return;
+      const box = $('#chat-detail');
+      if (box) box.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
+    } finally {
+      if (chatArchiveInflight?.promise === promise) chatArchiveInflight = null;
     }
-  } catch (e) {
-    if (state.currentChatKey !== key) return;
-    const box = $('#chat-detail');
-    if (box) box.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
+  })();
+  chatArchiveInflight = { key, scope, promise };
+  return promise;
+}
+
+function loadMoreChatMessages() {
+  const key = state.currentChatKey, scope = chatArchiveScope();
+  if (chatArchiveInflight?.key === key && chatArchiveInflight.scope === scope) return chatArchiveInflight.promise;
+  if (state.chatArchiveKey !== key || state.chatArchiveScope !== scope) return;
+  const cached = (state.chatMessages || []).length;
+  const prev = Math.min(cached, Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE));
+  if (prev < cached) {
+    state.chatMsgLimit = Math.min(cached, prev + CHAT_MSG_MORE);
+    appendChatMessageRows(prev);
+    return;
   }
+  if (!state.chatHasMore) return;
+  const revision = ++chatArchiveRevision, offset = state.chatNextOffset;
+  const promise = (async () => {
+    try {
+      const data = await api(`/api/chats/${key.replace(':', '_')}/messages?limit=${Math.min(500, CHAT_MSG_MORE)}&offset=${offset}`);
+      if (state.currentChatKey !== key || chatArchiveScope() !== scope || revision !== chatArchiveRevision) return;
+      const messages = data.messages || [];
+      state.chatMessages = mergeArchiveMessages(state.chatMessages || [], messages);
+      state.chatMessageTotal = Number(data.total) || state.chatMessages.length;
+      state.chatNextOffset = Number(data.nextOffset) || offset + messages.length;
+      state.chatHasMore = messages.length > 0 && data.hasMore === true;
+      state.chatMsgLimit = Math.min(state.chatMessages.length, prev + CHAT_MSG_MORE);
+      if ((state.chatMsgRendered || 0) === prev) appendChatMessageRows(prev);
+      else updateChatMessagesBody(true);
+    } catch (error) {
+      if (state.currentChatKey !== key || chatArchiveScope() !== scope || revision !== chatArchiveRevision) return;
+      const more = $('#chat-msg-more');
+      if (more) more.textContent = `加载失败：${error.message}。继续向下滚动重试。`;
+    } finally {
+      if (chatArchiveInflight?.promise === promise) chatArchiveInflight = null;
+    }
+  })();
+  chatArchiveInflight = { key, scope, promise };
+  return promise;
 }
 
 /**
@@ -277,8 +346,8 @@ function chatMsgRowHtml(m) {
 
 /** 更新底部"还有 N 条"与顶部计数文案（全量渲染与追加都要刷这两处）。 */
 function updateChatMessagesMeta(newestFirst) {
-  const total = newestFirst.length;
-  const shownCount = Math.min(Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE), total);
+  const total = Number(state.chatMessageTotal) || newestFirst.length;
+  const shownCount = Math.min(Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE), newestFirst.length);
   const rest = total - shownCount;
   const more = $('#chat-msg-more');
   if (more) {
@@ -291,7 +360,7 @@ function updateChatMessagesMeta(newestFirst) {
     const meta = state.chats.find((c) => c.key === state.currentChatKey) || {};
     const t = meta.total || total || 0;
     cnt.textContent = t
-      ? `共 ${t} 条 · 已显示 ${shownCount} 条 · 存储于 data/messages/`
+      ? `共 ${t} 条 · 已显示 ${shownCount} 条 · 消息存档`
       : '暂无消息';
   }
 }
@@ -870,10 +939,13 @@ function updateUsagePage(stats, st, prices) {
   const fresh = box.querySelector('#usage-updated');
   if (fresh) {
     const at = Number(stats?.computedAt) || 0;
-    const txt = at ? `数据更新于 ${fmtTime(at)}` : '';
+    const txt = (at ? `数据更新于 ${fmtTime(at)}` : '')
+      + (stats?.index?.incomplete ? ' · 部分档案读取失败，统计不完整' : '');
     if (fresh.textContent !== txt) fresh.textContent = txt;
-    fresh.title = '用量统计每 3 小时自动重算一次；点「刷新」立即重算。'
-      + '页面顶部的「今日」概览是实时的，不受此缓存影响。';
+    fresh.title = stats?.index
+      ? '服务器按需增量统计；点「刷新」立即重算。'
+        + (stats.index.incomplete ? `\n${(stats.index.warnings || []).join('\n')}` : '')
+      : '用量统计每 3 小时自动重算一次；点「刷新」立即重算。页面顶部的「今日」概览是实时的。';
   }
 
   // 单日/24小时 → 隐藏"按天"

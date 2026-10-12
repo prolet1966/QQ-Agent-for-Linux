@@ -4,8 +4,12 @@
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { getConfig, DEFAULT_CONFIG } from './config.js';
-import { sleep, randInt, createSendChain, formatClockTime } from './util.js';
+import { randInt, formatClockTime } from './util.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { mediaMaxBytes } from './media-resources.js';
+import { BoundedWorkQueue } from './bounded-work.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
@@ -63,16 +67,66 @@ export class SendQueue {
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
     this.recentSent = new Map();  // "chatKey::text" -> ts（发送去重窗口）
+    this.queuedBytes = 0;
+    this.closed = false;
+    this.stopController = new AbortController();
+    this.jobs = new Set();
+    this.globalWork = new BoundedWorkQueue({ concurrency: () => Math.max(1, Number(getConfig().maxConcurrentRuns) || 2), capacity: 512, name: '发送' });
   }
 
-  #chain(chatKey) {
-    if (!this.chains.has(chatKey)) this.chains.set(chatKey, createSendChain());
-    return this.chains.get(chatKey);
+  #chain(chatKey, defaultBytes = 1024) {
+    return (fn, bytes = defaultBytes) => {
+      if (this.closed) return Promise.reject(new Error('发送队列已关闭，消息尚未发送'));
+      let state = this.chains.get(chatKey);
+      if (!state) state = { tail: Promise.resolve(), pending: 0 };
+      const cap = Math.max(1, Number(getConfig().resources?.sendQueuePerChat) || 64);
+      const cost = Math.max(1024, Number(bytes) || 1024);
+      if (state.pending >= cap || this.queuedBytes + cost > 32 * 1024 * 1024 || [...this.chains.values()].reduce((n, s) => n + s.pending, 0) >= 512) {
+        return Promise.reject(new Error('发送队列已满，消息尚未发送，请稍后重试'));
+      }
+      this.chains.set(chatKey, state);
+      state.pending++;
+      this.queuedBytes += cost;
+      const work = state.tail.then(() => {
+        if (this.closed) throw new Error('发送队列已关闭，消息尚未发送');
+        return this.globalWork.run(() => {
+          if (this.closed) throw new Error('发送队列已关闭，消息尚未发送');
+          return fn();
+        });
+      });
+      const result = work.finally(() => {
+        state.pending--;
+        this.queuedBytes -= cost;
+        this.jobs.delete(result);
+        if (!state.pending && this.chains.get(chatKey) === state) this.chains.delete(chatKey);
+      });
+      state.tail = result.catch(() => {});
+      this.jobs.add(result);
+      return result;
+    };
+  }
+
+  #sleep(ms) { return delay(ms, undefined, { signal: this.stopController.signal }); }
+
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.stopController.abort(new Error('发送队列已关闭'));
+    // The protocol client aborts active HTTP requests. Keep the store open until
+    // their send/record continuations and every queued rejection have settled.
+    return this.closePromise = Promise.allSettled([...this.jobs]).then(() => {});
   }
 
   #checkRate(chatKey) {
     const now = Date.now();
     const cfg = getConfig().send;
+    for (const [key, times] of this.hourTimes) {
+      if (!times.length || now - times[times.length - 1] >= 3600000) {
+        this.hourTimes.delete(key);
+        this.minuteTimes.delete(key);
+      }
+    }
+    if (!this.hourTimes.has(chatKey) && this.hourTimes.size >= 2048) throw new Error('活跃发送会话数量达到上限，请稍后重试');
     const minute = (this.minuteTimes.get(chatKey) || []).filter((t) => now - t < 60000);
     const hour = (this.hourTimes.get(chatKey) || []).filter((t) => now - t < 3600000);
     // 回退值必须与 config.js 的默认值一致（80）。此前这里是 8，
@@ -113,7 +167,7 @@ export class SendQueue {
   #isDuplicate(chatKey, text) {
     const win = this.#dedupeWindow();
     if (!win) return false;
-    const last = this.recentSent.get(`${chatKey}::${String(text)}`);
+    const last = this.recentSent.get(this.#fingerprint(chatKey, text));
     return Boolean(last && Date.now() - last < win);
   }
 
@@ -122,13 +176,18 @@ export class SendQueue {
     const win = this.#dedupeWindow();
     if (!win) return;
     const now = Date.now();
-    this.recentSent.set(`${chatKey}::${String(text)}`, now);
+    this.recentSent.set(this.#fingerprint(chatKey, text), now);
     // 顺手清理过期条目，避免 Map 无限增长
     if (this.recentSent.size > 500) {
       for (const [k, t] of this.recentSent) {
         if (now - t > win) this.recentSent.delete(k);
       }
     }
+    while (this.recentSent.size > 1024) this.recentSent.delete(this.recentSent.keys().next().value);
+  }
+
+  #fingerprint(chatKey, text) {
+    return `${chatKey}::${crypto.createHash('sha256').update(String(text)).digest('hex')}`;
   }
 
   /**
@@ -147,6 +206,7 @@ export class SendQueue {
   #localSegmentsToBase64(segs) {
     let changed = false;
     const out = [];
+    let total = 0;
     for (const s of segs) {
       const ref = s?.data?.file;
       let pushed = s;
@@ -157,7 +217,8 @@ export class SendQueue {
         if (local && fs.existsSync(local)) {
           try {
             const st = fs.statSync(local);
-            if (st.size > 0 && st.size <= 15 * 1024 * 1024) {
+            total += st.size;
+            if (st.size > 0 && total <= mediaMaxBytes()) {
               const b64 = fs.readFileSync(local).toString('base64');
               pushed = { type: 'image', data: { file: `base64://${b64}` } };
               changed = true;
@@ -189,6 +250,7 @@ export class SendQueue {
     if (kind !== 'group' && kind !== 'private') throw new Error(`非法会话 key：${chatKey}`);
     const list = Array.isArray(messages) ? messages : [messages];
     if (!list.length) throw new Error('消息列表为空');
+    if (list.length > 64 || list.some((m) => typeof m === 'string' && Buffer.byteLength(m) > 64 * 1024)) throw new Error('单次发送内容超过上限（最多 64 条，每条 64 KiB）');
     const hardSplitAt = Number(getConfig().send?.hardSplitAt) || 0;
     const parts = [];
     for (const m of list) {
@@ -201,6 +263,7 @@ export class SendQueue {
       else parts.push(plain);
     }
     if (!parts.length) throw new Error('消息内容为空');
+    if (parts.length > 64) throw new Error('切分后的消息超过 64 条，请缩短内容后重试');
 
     const chain = this.#chain(chatKey);
     const promises = [];
@@ -210,7 +273,7 @@ export class SendQueue {
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
         this.#checkRate(chatKey);
-        if (gap > 0) await sleep(gap);
+        if (gap > 0) await this.#sleep(gap);
         // 发送去重：窗口期内 identical 文本跳过（防模型重复调用/超时重试造成的重复发言）
         if (this.#isDuplicate(chatKey, text)) {
           console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
@@ -225,7 +288,7 @@ export class SendQueue {
         this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
         return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
-      }));
+      }, Buffer.byteLength(text) * 2));
     }
 
     const settled = await Promise.allSettled(promises);
@@ -253,7 +316,7 @@ export class SendQueue {
     const chain = this.#chain(chatKey);
     return chain(async () => {
       this.#checkRate(chatKey);
-      await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
+      await this.#sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
       // ── 发送回退链（修"表情包经常发送失败"）────────────────────────────
       // 表情库里的 url 有三种形态，稳定性天差地别：
       //   1. file:/// 本地转存（收藏功能写入，永久有效）—— 最优先
@@ -280,8 +343,9 @@ export class SendQueue {
           try {
             const p = fileUriToPath(primary);
             if (p && fs.existsSync(p)) {
+              if (fs.statSync(p).size > mediaMaxBytes()) throw new Error('表情图片超过媒体体积上限');
               const buf = fs.readFileSync(p);
-              if (buf.length && buf.length <= 15 * 1024 * 1024) {
+              if (buf.length && buf.length <= mediaMaxBytes()) {
                 this.log?.(`[sender] 本地表情路径发送失败（${firstError?.message ?? firstError}），改 base64 发送`);
                 data = await sendVia(`base64://${buf.toString('base64')}`);
               }
@@ -305,7 +369,7 @@ export class SendQueue {
           // 回退 2：下载直链转 base64 内联（此刻直链可能恰好还有效）。上限 15MB。
           if (!data) {
             const { safeFetchBinary } = await import('./safe-fetch.js');
-            const { buffer } = await safeFetchBinary(primary, 15 * 1024 * 1024);
+            const { buffer } = await safeFetchBinary(primary, mediaMaxBytes());
             if (!buffer?.length) throw firstError;
             this.log?.(`[sender] 表情直链发送失败，已下载 ${Math.round(buffer.length / 1024)}KB 转 base64 发送`);
             data = await sendVia(`base64://${buffer.toString('base64')}`);
@@ -333,9 +397,10 @@ export class SendQueue {
    */
   sendImage(chatKey, img, options = {}) {
     const [kind, id] = String(chatKey).split(':');
-    const chain = this.#chain(chatKey);
     const url = String(img?.url ?? '').trim();
     const dataUrl = String(img?.dataUrl ?? '').trim();
+    if (dataUrl.length > Math.ceil(mediaMaxBytes() * 4 / 3) + 256) return Promise.reject(new Error('图片超过媒体体积上限'));
+    const chain = this.#chain(chatKey, (dataUrl.length + url.length) * 2 + 1024);
     // ── 本地文件路径优先（修过一个真实故障）──────────────────────────────
     // 原来只会传 `url` 或 `dataUrl`。而 `dataUrl` 是 base64 内联进 HTTP body 的：
     // 一张 1.9MB 的图 → base64 后 2.5MB 要 POST 给协议端，协议端再解码、再上传腾讯，
@@ -358,7 +423,7 @@ export class SendQueue {
         throw new Error('这张图刚刚发过，已跳过（避免重复刷屏）');
       }
       this.#checkRate(chatKey);
-      await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
+      await this.#sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
 
       let data;
       try {
@@ -375,7 +440,7 @@ export class SendQueue {
           try {
             const localPath = fileUriToPath(ref);
             const st = localPath && fs.existsSync(localPath) ? fs.statSync(localPath) : null;
-            if (st && st.size > 0 && st.size <= 15 * 1024 * 1024) {
+            if (st && st.size > 0 && st.size <= mediaMaxBytes()) {
               const buf = fs.readFileSync(localPath);
               this.log?.(`[sender] 本地图片路径发送失败（${error?.message ?? error}），改 base64 发送`);
               data = await this.onebot.sendImage(kind, id, `base64://${buf.toString('base64')}`, {
@@ -430,18 +495,19 @@ export class SendQueue {
     if (kind !== 'group' && kind !== 'private') return Promise.reject(new Error(`非法会话 key：${chatKey}`));
     const segs = (Array.isArray(segments) ? segments : []).filter((s) => s && s.type);
     if (!segs.length) return Promise.reject(new Error('媒体段为空'));
+    if (segs.length > 32 || segs.reduce((n, s) => n + String(s?.data?.file || '').length, 0) > Math.ceil(mediaMaxBytes() * 4 / 3) + 256) return Promise.reject(new Error('媒体段数量或内联数据超过上限'));
     const label = String(options.label || '[媒体]');
     // 去重键优先用本地文件路径（同一份文件重复发说明是重试/重复触发）
     const dedupeKey = String(options.dedupeKey
       || segs.map((s) => s?.data?.file).filter(Boolean).join('|')
       || label);
-    const chain = this.#chain(chatKey);
+    const chain = this.#chain(chatKey, segs.reduce((n, s) => n + String(s?.data?.file || '').length * 2, 1024));
     return chain(async () => {
       if (this.#isDuplicate(chatKey, `__media__${dedupeKey}`)) {
         throw new Error('这份媒体刚刚发过，已跳过（避免重复刷屏）');
       }
       this.#checkRate(chatKey);
-      await sleep(randInt(800, 1800));   // 视频/多图体积大，停顿比文字长一点
+      await this.#sleep(randInt(800, 1800));   // 视频/多图体积大，停顿比文字长一点
       let data;
       try {
         data = await this.onebot.sendSegments(kind, id, segs);
@@ -473,7 +539,7 @@ export class SendQueue {
       // 拍一拍同样占发送配额 —— 曾经不调 #checkRate，模型连发 poke
       // 可以绕过 maxPerMinute/maxPerHour 刷屏
       this.#checkRate(chatKey);
-      await sleep(randInt(300, 900));
+      await this.#sleep(randInt(300, 900));
       const data = await this.onebot.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';

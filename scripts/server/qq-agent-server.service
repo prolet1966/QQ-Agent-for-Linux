@@ -1,0 +1,34 @@
+[Unit]
+Description=QQ Agent headless server console
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=@INSTALL_ROOT@/current/src/server.js
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@INSTALL_ROOT@/current
+EnvironmentFile=-/etc/qq-agent/server.env
+Environment=NODE_ENV=production
+Environment=DISPLAY=
+ExecStart=@NODE_EXEC@ @INSTALL_ROOT@/current/src/server.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+# Configure MemoryHigh/MemoryMax only after measuring the core plus Workers.
+# NODE_OPTIONS=--max-old-space-size=256 may be set in server.env; Node heap
+# limits do not bound native Buffers, Worker heaps or protocol processes.
+TasksMax=256
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

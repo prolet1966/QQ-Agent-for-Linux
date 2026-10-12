@@ -17,6 +17,36 @@ import { DATA_DIR } from './config.js';
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const MAX_MEMORY = 500;          // 内存里保留最近多少条（UI 查看）
 const KEEP_DAYS = 7;             // 日志文件保留天数
+const MAX_LINE_BYTES = 16 * 1024;
+const MAX_MEMORY_BYTES = 1024 * 1024;
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+function capText(value, max = MAX_LINE_BYTES) {
+  const input = String(value);
+  const buffer = Buffer.from(input.slice(0, max));
+  if (buffer.length <= max && input.length <= max) return buffer.toString();
+  return buffer.subarray(0, max - 48).toString('utf8') + '…（过长已截断）';
+}
+
+// Bound object traversal before serializing so a huge protocol payload cannot inflate a log entry.
+function logValue(value, depth = 0, seen = new Set()) {
+  if (value instanceof Error) return capText(`${value.message}\n${value.stack || ''}`);
+  if (typeof value === 'string') return capText(value, 8192);
+  if (value === null || typeof value !== 'object') return String(value);
+  if (depth >= 3) return '[Object]';
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  const copy = Array.isArray(value) ? [] : {};
+  let count = 0;
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (count++ >= 32) { copy._truncated = true; break; }
+    try { copy[key] = logValue(value[key], depth + 1, seen); } catch { copy[key] = '[Unreadable]'; }
+  }
+  seen.delete(value);
+  try { return capText(JSON.stringify(copy)); } catch { return '[Unserializable]'; }
+}
 
 function logsDir() {
   return path.join(DATA_DIR, 'logs');
@@ -35,6 +65,8 @@ class Logger {
     this.listeners = new Set();       // onLog 监听（SSE 推送）
     this.mirrorConsole = true;        // 是否同时走 console
     this.writing = false;             // 重入标记：监听器若再打日志，直接丢弃（防递归爆炸）
+    this.memoryBytes = 0;
+    this.nextPruneAt = 0;
   }
 
   setLevel(level) {
@@ -72,18 +104,16 @@ class Logger {
 
   #writeInner(level, module, args) {
     const lv = LEVELS[level] ?? LEVELS.info;
-    const text = args.map((a) => {
-      if (a instanceof Error) return `${a.message}\n${a.stack || ''}`;
-      if (typeof a === 'object' && a !== null) {
-        try { return JSON.stringify(a); } catch { return String(a); }
-      }
-      return String(a);
-    }).join(' ');
-    const entry = { ts: Date.now(), level, module: String(module || 'app'), text };
+    const text = capText(args.slice(0, 16).map((a) => logValue(a)).join(' '));
+    const entry = { ts: Date.now(), level, module: capText(module || 'app', 256), text };
 
     // 内存环形缓冲（UI 查看 + SSE 推送）
     this.memory.push(entry);
-    if (this.memory.length > MAX_MEMORY) this.memory.splice(0, this.memory.length - MAX_MEMORY);
+    this.memoryBytes += Buffer.byteLength(text) + Buffer.byteLength(entry.module) + 128;
+    while (this.memory.length > MAX_MEMORY || this.memoryBytes > MAX_MEMORY_BYTES) {
+      const old = this.memory.shift();
+      this.memoryBytes -= Buffer.byteLength(old.text) + Buffer.byteLength(old.module) + 128;
+    }
     for (const fn of [...this.listeners]) {
       try { fn(entry); } catch { /* ignore */ }
     }
@@ -103,8 +133,19 @@ class Logger {
         const time = new Date(entry.ts).toLocaleTimeString('zh-CN', { hour12: false });
         const line = `${time} [${level.toUpperCase().padEnd(5)}] [${entry.module}] ${text}\n`;
         // 单条上限：异常对象/大 payload 序列化后可能上 MB，截断保护磁盘
-        const capped = line.length > 64 * 1024 ? line.slice(0, 64 * 1024) + '…（过长已截断）\n' : line;
-        fs.appendFileSync(todayFile(), capped, 'utf8');
+        const capped = capText(line) + '\n';
+        const file = todayFile();
+        let rotate = false;
+        try { rotate = fs.statSync(file).size + Buffer.byteLength(capped) > MAX_FILE_BYTES; } catch { /* New file. */ }
+        if (rotate) {
+          fs.renameSync(file, file.replace(/\.log$/, `-${Date.now()}-${process.pid}.log`));
+          this.nextPruneAt = 0;
+        }
+        fs.appendFileSync(file, capped, 'utf8');
+        if (Date.now() >= this.nextPruneAt) {
+          this.nextPruneAt = Date.now() + 60000;
+          this.prune();
+        }
       } catch { /* 写盘失败不影响运行 */ }
     }
   }
@@ -120,8 +161,9 @@ class Logger {
       const dir = logsDir();
       if (!fs.existsSync(dir)) return;
       const cutoff = Date.now() - KEEP_DAYS * 86400000;
+      const files = [];
       for (const f of fs.readdirSync(dir)) {
-        if (!f.endsWith('.log')) continue;
+        if (!f.startsWith('qq-agent-') || !f.endsWith('.log')) continue;
         try {
           const fp = path.join(dir, f);
           const st = fs.statSync(fp);
@@ -129,16 +171,24 @@ class Logger {
           /* 单文件超过 256MB 即视为异常（正常一天 < 10MB）：
              截断保留尾部最近的内容，并留一行说明。
              曾经递归事故把单文件写到 15GB，97.7% 是重复前缀。 */
-          if (st.size > 256 * 1024 * 1024) {
-            const keep = 16 * 1024 * 1024;
+          if (st.size > MAX_FILE_BYTES) {
+            const keep = 1024 * 1024;
             const fd = fs.openSync(fp, 'r');
             const buf = Buffer.alloc(keep);
             fs.readSync(fd, buf, 0, keep, st.size - keep);
             fs.closeSync(fd);
-            const head = `（日志异常膨胀，已截断：原 ${(st.size / 1024 / 1024 / 1024).toFixed(2)}GB，保留尾部 16MB）\n`;
+            const head = `（日志异常膨胀，已截断：原 ${(st.size / 1024 / 1024).toFixed(2)}MB，保留尾部 1MB）\n`;
             fs.writeFileSync(fp, head + buf.toString('utf8'), 'utf8');
           }
+          files.push({ file: fp, time: st.mtimeMs, size: fs.statSync(fp).size });
         } catch { /* ignore */ }
+      }
+      let total = files.reduce((n, f) => n + f.size, 0);
+      files.sort((a, b) => a.time - b.time);
+      for (const f of files) {
+        if (total <= MAX_TOTAL_BYTES) break;
+        fs.unlinkSync(f.file);
+        total -= f.size;
       }
     } catch { /* ignore */ }
   }

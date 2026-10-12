@@ -12,6 +12,8 @@
 
 ---
 
+本分支新增纯 Node 服务器运行方式和 `server-2c2g` 预设。无需 QQA Electron 桌面壳，可通过 IP:3210 登录管理；SnowLuma 与 Linux QQ 独立运行。服务器包不含内置 Skill/插件，用户从市场按需选装。安装、升级、数据迁移和回滚见 [服务器安装文档](docs/server-install.md)，实现及验收状态见 [服务器适配记录](docs/server-2c2g-implementation.md)。
+
 ## 版本口径（唯一真源）
 
 仓库里长期存在"Release 标题 0.4.6 / 包版本 0.4.4.1"这类不一致。现在统一为：
@@ -29,7 +31,7 @@
 ## 📖 这是什么
 
 [QQ Agent](https://github.com/Kondius/qq-agent) 是一个接 OpenAI 兼容 API 的 QQ 群 AI 机器人，
-自带 16 个技能与 12 个插件，通过 **OneBot v11** 协议与 [SnowLuma](https://github.com/SnowLuma/SnowLuma)
+支持用户按需选装技能与插件，通过 **OneBot v11** 协议与 [SnowLuma](https://github.com/SnowLuma/SnowLuma)
 协议端通信。
 
 它原本是 Windows 桌面程序。**本仓库是它的 Linux 移植版**：修复了全部 Windows-only 硬编码，

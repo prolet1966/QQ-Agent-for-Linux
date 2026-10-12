@@ -17,6 +17,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { getConfig } from './config.js';
+import { mediaDownloads, mediaMaxBytes } from './media-resources.js';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 const dnsLookup = dns.promises.lookup;
 
@@ -230,6 +233,12 @@ function readBounded(res, maxBytes, asText) {
     res.on('data', (chunk) => {
       if (settled) return;
       total += chunk.length;
+      if (!asText && total >= maxBytes) {
+        const error = new Error(`文件达到大小上限（${maxBytes} 字节），已中止`);
+        finish(reject, error);
+        res.destroy();
+        return;
+      }
       if (asText) text += decoder.write(chunk);
       else chunks.push(chunk);
       // 只用字节数判断是否超限。原实现还额外判断了 text.length >= maxBytes，
@@ -255,7 +264,15 @@ function readBounded(res, maxBytes, asText) {
 }
 
 // 使用已校验的 IP 发起请求（保留 Host/SNI），从根上消除 DNS rebinding。
-function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  return new Promise((resolve, reject) => {
+function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, timeoutMs = 20000 } = {}) {  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    const done = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(value);
+    };
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
     const req = mod.request({
@@ -275,16 +292,17 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  re
     }, (res) => {
       const statusCode = res.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
-        res.resume();
-        resolve({ statusCode, redirect: String(res.headers.location || '') });
+        res.destroy();
+        done(null, { statusCode, redirect: String(res.headers.location || '') });
         return;
       }
       readBounded(res, maxBytes, !asBinary)
-        .then((body) => resolve({ statusCode, body, contentType: String(res.headers['content-type'] || '') }))
-        .catch(reject);
+        .then((body) => done(null, { statusCode, body, contentType: String(res.headers['content-type'] || '') }))
+        .catch((error) => done(error));
     });
     req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
-    req.on('error', reject);
+    req.on('error', (error) => done(error));
+    timer = setTimeout(() => req.destroy(new Error(`下载总时长超限：${url.hostname}`)), timeoutMs);
     req.end();
   });
 }
@@ -318,13 +336,21 @@ export async function safeFetch(urlString, { browseLocked = false } = {}) {
 }
 
 /** 下载二进制（图片，≤maxBytes 字节），返回 { buffer, contentType }。 */
-export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { browseLocked = false } = {}) {
+export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { browseLocked = false, timeoutMs = 30000 } = {}) {
+  const requested = Math.min(64 * 1024 * 1024, Math.max(1, Number(maxBytes) || 12 * 1024 * 1024));
+  return mediaDownloads.run(() => fetchBinary(urlString, mediaMaxBytes(requested), { browseLocked, timeoutMs }));
+}
+
+async function fetchBinary(urlString, maxBytes, { browseLocked = false, timeoutMs = 30000 } = {}) {
   const lock = browseLocked ? checkBrowseLock(urlString) : { enabled: false, allowed: true, host: '' };
   if (!lock.allowed) throw new Error(`浏览锁定：${lock.host || '该地址'} 不在允许的域名清单内`);
   const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
+  const deadline = Date.now() + Math.min(120000, Math.max(100, Number(timeoutMs) || 30000));
   let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: true, maxBytes });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('下载总时长超限');
+    const result = await requestOnce(url, ip, { asBinary: true, maxBytes, timeoutMs: remaining });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -356,69 +382,56 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { 
 /** 把一次响应流式写入 dest（200 时）；重定向只取 Location，响应体直接排空丢弃。 */
 function requestToFile(url, ip, dest, { limit = Infinity, timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let streaming = false;
+    let timer;
+    const done = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(value);
+    };
     const mod = url.protocol === 'https:' ? https : http;
-    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
     const req = mod.request({
       hostname: ip,
-      port,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search,
       method: 'GET',
-      headers: {
-        host: url.host,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
-        'accept-language': 'zh-CN,zh;q=0.9'
-      },
+      headers: { host: url.host, 'user-agent': 'qq-agent/1.0', accept: '*/*' },
       servername: url.protocol === 'https:' ? url.hostname : undefined,
       rejectUnauthorized: url.protocol === 'https:',
-      // 大文件下载：这是 socket 空闲超时而非总时长上限 —— 数据持续流动时不触发，
-      // 卡死的连接才会被掐掉（与 requestOnce 的行为一致，只是上限放宽到 timeoutMs）
       timeout: timeoutMs
     }, (res) => {
       const statusCode = res.statusCode || 0;
       const contentType = String(res.headers['content-type'] || '');
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
-        res.resume();   // 丢弃重定向页响应体，不落盘
-        resolve({ statusCode, redirect: String(res.headers.location || ''), bytes: 0, contentType });
+        res.destroy();
+        done(null, { statusCode, redirect: String(res.headers.location || ''), bytes: 0, contentType });
         return;
       }
       if (statusCode !== 200) {
-        res.resume();   // 排空连接便于复用；错误响应体不落盘
-        resolve({ statusCode, bytes: 0, contentType });
+        res.destroy();
+        done(null, { statusCode, bytes: 0, contentType });
         return;
       }
       let total = 0;
-      let settled = false;
-      let overLimit = false;
-      const finish = (val) => { if (settled) return; settled = true; resolve(val); };
-      const fail = (err) => { if (settled) return; settled = true; try { res.destroy(); } catch { /* ignore */ } reject(err); };
+      const bound = new Transform({
+        transform(chunk, _encoding, callback) {
+          total += chunk.length;
+          if (total >= limit) callback(new Error('文件达到大小上限，已中止'));
+          else callback(null, chunk);
+        }
+      });
       const out = fs.createWriteStream(dest, { flags: 'w' });
-      res.on('data', (chunk) => {
-        if (settled) return;
-        total += chunk.length;
-        if (total >= limit) {
-          // 到达上限立即掐断：已写部分反正会被调用方整文件删除，多收无益
-          overLimit = true;
-          try { res.destroy(); } catch { /* ignore */ }
-          out.end();
-          finish({ statusCode, bytes: total, contentType, overLimit });
-          return;
-        }
-        if (!out.write(chunk)) {
-          // 背压：写盘跟不上网络就读慢一点，别把 chunks 全堆在内存里
-          res.pause();
-          out.once('drain', () => res.resume());
-        }
-      });
-      res.on('end', () => {
-        if (settled) return;
-        out.end(() => finish({ statusCode, bytes: total, contentType, overLimit }));
-      });
-      res.on('error', fail);
-      out.on('error', fail);
+      streaming = true;
+      pipeline(res, bound, out).then(
+        () => done(null, { statusCode, bytes: total, contentType }),
+        (error) => done(error)
+      );
     });
-    req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
-    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('下载连接超时')));
+    req.on('error', (error) => { if (!streaming) done(error); });
+    timer = setTimeout(() => req.destroy(new Error('下载总时长超限')), timeoutMs);
     req.end();
   });
 }
@@ -437,6 +450,10 @@ function requestToFile(url, ip, dest, { limit = Infinity, timeoutMs = 30000 } = 
  *                            { browseLocked = false }（浏览锁定逐跳校验）
  */
 export async function safeFetchBinaryToFile(urlString, destPath, maxBytes, { timeoutMs = 30000, browseLocked = false } = {}) {
+  return mediaDownloads.run(() => fetchBinaryToFile(urlString, destPath, Math.min(maxBytes, mediaMaxBytes(200 * 1024 * 1024)), { timeoutMs, browseLocked }));
+}
+
+async function fetchBinaryToFile(urlString, destPath, maxBytes, { timeoutMs = 30000, browseLocked = false } = {}) {
   const dest = String(destPath || '');
   if (!dest) throw new Error('缺少目标文件路径');
   const limit = Math.max(1, Number(maxBytes) || 1);
@@ -447,10 +464,13 @@ export async function safeFetchBinaryToFile(urlString, destPath, maxBytes, { tim
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   let ok = false;
+  const deadline = Date.now() + Math.min(120000, Math.max(100, Number(timeoutMs) || 30000));
   try {
     let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
     for (let i = 0; i <= MAX_REDIRECTS; i++) {
-      const r = await requestToFile(url, ip, dest, { limit, timeoutMs });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('下载总时长超限');
+      const r = await requestToFile(url, ip, dest, { limit, timeoutMs: remaining });
       if (r.redirect !== undefined) {
         if (!r.redirect) throw new Error(`重定向缺少 Location: ${r.statusCode}`);
         const next = new URL(r.redirect, url).toString();

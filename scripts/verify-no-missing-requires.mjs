@@ -50,7 +50,9 @@ const jsFiles = [];
   for (const e of entries) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p);
-    else if (e.isFile() && /\.(js|cjs|mjs)$/.test(e.name)) jsFiles.push(p);
+    // This verifier contains illustrative require('...') examples in its
+    // comments; scanning itself would report the ellipsis as a missing module.
+    else if (e.isFile() && /\.(js|cjs|mjs)$/.test(e.name) && e.name !== 'verify-no-missing-requires.mjs') jsFiles.push(p);
   }
 })(ROOT);
 

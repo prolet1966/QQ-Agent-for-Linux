@@ -564,6 +564,7 @@ async function api(path, options = {}) {
       ...(timeoutMs && !rest.signal ? { signal: AbortSignal.timeout(timeoutMs) } : {})
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && reqPath.startsWith('/api/') && !reqPath.startsWith('/api/proxy/')) location.assign('/login.html');
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   } catch (e) {

@@ -77,6 +77,8 @@ function loadMeta(chatKey) {
 export class MemoryStore {
   constructor() {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
+    this.cacheBytes = new Map();
+    this.migrating = new Set();
   }
 
   /** 扫描所有有记忆的会话（文件夹或旧版单文件）。 */
@@ -98,12 +100,14 @@ export class MemoryStore {
 
   /** 旧版单文件 → 新版每成员文件。迁移后旧文件移到 backups/。 */
   #migrateLegacy(chatKey) {
+    if (this.migrating.has(chatKey)) return;
     const legacy = legacyFile(chatKey);
     if (!fs.existsSync(legacy)) return;
     try {
       if (fs.statSync(legacy).isDirectory()) return;
       const old = readJson(legacy, null);
       if (!old) return;
+      this.migrating.add(chatKey);
       const notes = getConfig().memberNotes || {};
       const nameToQq = {};
       for (const [qq, name] of Object.entries(notes)) {
@@ -125,12 +129,12 @@ export class MemoryStore {
       for (const m of migrated) this.#appendRaw(chatKey, m.userId, m.name, m.content, m.createdAt);
       const backupDir = path.join(MEMORY_DIR, 'backups');
       fs.mkdirSync(backupDir, { recursive: true });
-      const backup = path.join(backupDir, path.basename(legacy));
-      if (fs.existsSync(backup)) fs.rmSync(backup, { force: true });
+      let backup = path.join(backupDir, path.basename(legacy));
+      if (fs.existsSync(backup)) backup += `.${Date.now()}.bak`;
       fs.renameSync(legacy, backup);
     } catch (error) {
       console.error('[memory] 旧记忆迁移失败:', error?.message ?? error);
-    }
+    } finally { this.migrating.delete(chatKey); }
   }
 
   #ensureChat(chatKey) {
@@ -149,7 +153,27 @@ export class MemoryStore {
       this.#mergeNameDuplicates(chatKey, map);
       this.cache.set(chatKey, map);
     }
-    return this.cache.get(chatKey);
+    const map = this.cache.get(chatKey);
+    // Every mutation is persisted to its member file; evicting a cold chat only drops its cache.
+    this.cache.delete(chatKey);
+    this.cache.set(chatKey, map);
+    const cap = Math.max(1, Number(getConfig().resources?.memoryCacheChats) || 32);
+    let bytes = 0;
+    for (const member of map.values()) {
+      bytes += 256 + Buffer.byteLength(String(member.name || ''));
+      for (const impression of member.impressions || []) bytes += 96 + Buffer.byteLength(String(impression.content || ''));
+    }
+    this.cacheBytes.set(chatKey, bytes);
+    for (const key of this.cacheBytes.keys()) if (!this.cache.has(key)) this.cacheBytes.delete(key);
+    const maxBytes = 8 * 1024 * 1024;
+    let total = [...this.cache.keys()].reduce((n, key) => n + (this.cacheBytes.get(key) || 0), 0);
+    while (this.cache.size > cap || total > maxBytes) {
+      const key = this.cache.keys().next().value;
+      total -= this.cacheBytes.get(key) || 0;
+      this.cache.delete(key);
+      this.cacheBytes.delete(key);
+    }
+    return map;
   }
 
   /**

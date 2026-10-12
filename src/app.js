@@ -36,6 +36,18 @@ import { listOneBotAccounts, findAccount, accountEndpoints, probeAccount } from 
 // 平台抽象层：Windows / Linux 的差异（进程查询、打开器、QQ 路径、SnowLuma 运行时）
 // 全部收敛在 platform.js，本文件不再直接出现 wmic / explorer.exe / cmd.exe / node.exe。
 import * as platform from './platform.js';
+import { isServerMode, sameOriginAllowed, protocolEndpoint } from './runtime.js';
+import { ConsoleAuth } from './console-auth.js';
+import { SseHub } from './sse.js';
+import { TaskQueue } from './task-queue.js';
+import { EventInbox } from './event-inbox.js';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { createSnowlumaProxy } from './snowluma-proxy.js';
+import { diagnoseSnowluma } from './protocol-diagnostics.js';
+import { protocolService } from './protocol-service.js';
+import { redactUrl } from './url-redaction.js';
+import { UsageService } from './usage-service.js';
+import { createDesktopProxy } from './desktop-proxy.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -89,7 +101,26 @@ function compareSemver(a, b) {
    防止监听器链式递归（见 createApp 内的递归护栏注释）。 */
 const appLogFns = new WeakSet();
 
-export function createApp({ log = console.log } = {}) {
+export function createApp(options = {}) {
+  const lockResult = instanceLockModule.acquireInstanceLock();
+  if (!lockResult.ok) throw new Error(`[单实例] ${lockResult.reason}。如需多开测试，请用不同的 QQ_AGENT_DATA_DIR。`);
+  const disposers = [];
+  try {
+    const app = createLockedApp(options, dispose => disposers.push(dispose));
+    instanceLockModule.registerLockCleanup();
+    return app;
+  } catch (error) {
+    const pending = [];
+    for (const dispose of disposers.reverse()) {
+      try { const result = dispose(); if (result?.then) pending.push(result); } catch { /* preserve original error */ }
+    }
+    if (pending.length) Promise.allSettled(pending).finally(() => instanceLockModule.releaseInstanceLock());
+    else instanceLockModule.releaseInstanceLock();
+    throw error;
+  }
+}
+
+function createLockedApp({ log = console.log } = {}, onConstructionCleanup) {
   const cfg = getConfig();
 
   // 详尽日志：把 createApp 的 log 接到分级日志系统（落盘 + 内存缓冲 + SSE）。
@@ -110,10 +141,12 @@ export function createApp({ log = console.log } = {}) {
   //   每轮递归给文本再包一层 [app] 前缀 —— 一条日志膨胀成几千条、
   //   每条带几千个 [app] 前缀，几个小时内日志文件就能写到 15GB。
   //   这里用 WeakSet 识别"这个 log 是不是 appLog"，是则跳过挂载。
+  let removeLogListener;
   if (!appLogFns.has(log)) {
-    logger.onLog((entry) => {
+    removeLogListener = logger.onLog((entry) => {
       try { log(`[${entry.module}] ${entry.text}`); } catch { /* ignore */ }
     });
+    onConstructionCleanup(() => removeLogListener?.());
   }
   appLogFns.add(appLog);
   // 关掉 logger 的 console 镜像，避免与上面的监听器重复打印（调用方 log 通常就是 console.log）。
@@ -126,17 +159,27 @@ export function createApp({ log = console.log } = {}) {
   // ── 进程单实例锁（防止桌面端 + headless 双开导致重复回复群消息）──
   // 与 Electron 的 requestSingleInstanceLock 互补：那只管 Electron 进程之间，
   // 这里管"同一数据目录下任何形态的 QQ Agent 核心"（含 node src/server.js）。
-  const { acquireInstanceLock, releaseInstanceLock } = instanceLockModule;
-  const lockResult = acquireInstanceLock();
-  if (!lockResult.ok) {
-    // 不抛异常上抛让进程退出 —— 创建期的失败应当让整个启动失败。
-    throw new Error(`[单实例] ${lockResult.reason}。如需多开测试，请用不同的 QQ_AGENT_DATA_DIR。`);
-  }
+  const { releaseInstanceLock } = instanceLockModule;
   /* 抢到锁后立刻注册退出清理：正常 exit / SIGINT / SIGTERM 都会释放锁文件。
      曾经只在 stop() 里释放 —— 进程被直接杀掉（任务管理器结束、控制台叉掉）
      时锁文件残留，下次启动要靠"PID 已死"探测才能清掉，多一层失败面。 */
-  instanceLockModule.registerLockCleanup();
-  const sseClients = new Set();
+  const auth = (isServerMode() || cfg.server?.auth) ? new ConsoleAuth(DATA_DIR) : null;
+  onConstructionCleanup(() => auth?.close());
+  const sse = new SseHub({ maxClients: cfg.server?.maxSseClients || 8, authorize });
+  onConstructionCleanup(() => sse.close());
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  loopDelay.enable();
+  onConstructionCleanup(() => loopDelay.disable());
+  const backgroundTimers = new Set();
+  let stopTelemetry;
+  const incoming = isServerMode()
+    ? new EventInbox({ dataDir: DATA_DIR, capacity: Math.min(4096, cfg.resources?.incomingQueue || 512),
+      onError: error => log('[ingest] 持久事件队列:', error?.message ?? error) })
+    : new TaskQueue({ concurrency: cfg.resources?.incomingConcurrency || 1, capacity: cfg.resources?.incomingQueue || 512,
+      onError: error => log('[ingest] 处理事件出错:', error?.message ?? error) });
+  onConstructionCleanup(() => incoming.close({ deadlineMs: 0 }));
+  const appUsage = isServerMode() ? new UsageService() : null;
+  onConstructionCleanup(() => appUsage?.close());
 
   // ── SnowLuma 程序目录与进程管理 ──
   /** 目录是否可写：真写一个临时文件再删（access(W_OK) 在 root/ACL 下会撒谎）。 */
@@ -174,7 +217,14 @@ export function createApp({ log = console.log } = {}) {
       if (mutable.includes(name)) continue;
       let exists = false;
       try { fs.lstatSync(dst); exists = true; } catch { exists = false; }
-      if (exists) continue;   // 已建过（含用户已有）就不动
+      if (exists) {
+        try {
+          if (fs.lstatSync(dst).isSymbolicLink() && path.resolve(path.dirname(dst), fs.readlinkSync(dst)) !== src) {
+            fs.unlinkSync(dst); fs.symlinkSync(src, dst);
+          }
+        } catch { /* keep user files and data on failure */ }
+        continue;
+      }
       try { fs.symlinkSync(src, dst); } catch { /* 软链失败则跳过该条目 */ }
     }
     return mirror;
@@ -182,6 +232,7 @@ export function createApp({ log = console.log } = {}) {
 
   /** SnowLuma 的落盘目录（不可写时返回用户区的可写镜像，见 ensureSnowlumaMirror）。 */
   function snowlumaDir() {
+    if (getConfig().snowluma?.mode === 'external') return '';
     const configured = String(getConfig().snowluma?.dir || '').trim();
     if (configured) return configured;
     let bundled = path.join(ROOT, 'snowluma');
@@ -386,16 +437,30 @@ export function createApp({ log = console.log } = {}) {
   let pluginWatcher = null;        // 开发模式热重载 watcher（stop() 时要 close，否则句柄泄漏）
   let obPortPollTimer = null;      // OneBot WS 端口就绪轮询（stop() 时要 clear，start() 里赋值）
 
+  function redactLogText(value) {
+    return String(value ?? '')
+      .replace(/((?:password|passwd|token|access_token|api[_-]?key|secret)\s*[=:]\s*)([^\s,'"&]+)/gi, '$1[REDACTED]')
+      .replace(/([?&](?:token|access_token|api_key|password|secret)=)[^&#\s]+/gi, '$1[REDACTED]');
+  }
+
   function pushSnowlumaLog(text, stream = 'stdout') {
-    const line = { at: Date.now(), stream, text: String(text ?? '').replace(/\r?\n$/, '') };
+    const line = { at: Date.now(), stream, text: redactLogText(String(text ?? '').replace(/\r?\n$/, '')) };
     if (!line.text) return;
     snowlumaLogs.push(line);
     if (snowlumaLogs.length > 500) snowlumaLogs.splice(0, snowlumaLogs.length - 500);
     emit('snowluma-log', line);
   }
 
-  function snowlumaStatus() {
-    return { embedded: !!snowlumaProc, pid: snowlumaProc?.pid ?? null };
+  async function snowlumaStatus() {
+    if (isServerMode()) {
+      const managed = await protocolService('snow');
+      const expected = path.join(snowlumaDir(), 'index.mjs').replace(/\\/g, '/');
+      const processes = (await platform.listProcesses()).filter(p => String(p.commandline || '').replace(/\\/g, '/').includes(expected));
+      return { embedded: false, running: !!managed.running || processes.length > 0,
+        managed: !!managed.running, installedService: managed.ok, serviceState: managed.state || '',
+        serviceError: managed.error || '', detected: processes.slice(0, 4).map(p => p.pid), pid: managed.pid || processes[0]?.pid || null };
+    }
+    return { embedded: !!snowlumaProc, running: !!snowlumaProc || await isPortOpen('127.0.0.1', snowlumaWebuiPort()), pid: snowlumaProc?.pid ?? null };
   }
 
   /** 关闭 SnowLuma。内置拉起的直接 kill；外部启动的（launcher 脚本 / 手动 node）按
@@ -410,6 +475,12 @@ export function createApp({ log = console.log } = {}) {
    *  现改用 platform.listProcesses()：Windows 走 PowerShell（保留原有 UTF-8
    *  处理，中文路径不乱码），Linux 直接读 /proc，零依赖。 */
   async function stopSnowluma() {
+    if (getConfig().snowluma?.mode === 'external') return false;
+    if (isServerMode()) {
+      const result = await protocolService('snow', 'stop');
+      if (!result.ok) throw new Error(result.error);
+      return !result.running;
+    }
     const proc = snowlumaProc;
     if (proc) {
       try {
@@ -597,6 +668,14 @@ export function createApp({ log = console.log } = {}) {
 
   /** 启动 QQ 客户端（如已在运行则跳过） */
   async function launchPortableQQ() {
+    if (getConfig().snowluma?.mode === 'external') return { ok: false, error: '当前使用外部协议端' };
+    if (isServerMode()) {
+      const managed = await protocolService('qq');
+      const external = (await listQqProcesses()).filter(p => !String(p.commandline || '').includes('--type='));
+      if (managed.running || external.length) return { ok: true, alreadyRunning: true, pid: managed.pid || external[0].pid, managed: !!managed.running };
+      const started = await protocolService('qq', 'start');
+      return { ...started, launched: started.ok && started.running };
+    }
     if (!qqPortableReady()) {
       return { ok: false, error: 'QQ 客户端不可用：Windows 请先运行 npm run setup 准备便携端；Linux 请安装官方 QQ（sudo apt install ./QQ_*.deb）' };
     }
@@ -671,6 +750,14 @@ export function createApp({ log = console.log } = {}) {
 
   /** 关闭 QQ 客户端（只结束匹配的 PID，绝不碰用户自己的 QQ） */
   async function stopPortableQQ() {
+    if (getConfig().snowluma?.mode === 'external') return { ok: false, error: '当前使用外部协议端，QQA 不管理其 QQ 进程' };
+    if (isServerMode()) {
+      const managed = await protocolService('qq');
+      if (!managed.ok) return managed;
+      if (!managed.running) return { ok: true, stopped: false, reason: '当前 QQ 由外部启动，QQA 不认领该进程' };
+      const stopped = await protocolService('qq', 'stop');
+      return { ...stopped, stopped: stopped.ok && !stopped.running };
+    }
     const pid = await qqPortableRunningPid();
     if (!pid) {
       pushQqLog('QQ 客户端未在运行');
@@ -703,6 +790,12 @@ export function createApp({ log = console.log } = {}) {
   /** QQ 客户端状态摘要 */
   async function qqPortableStatus() {
     const pid = await qqPortableRunningPid();
+    if (isServerMode()) {
+      const managed = await protocolService('qq');
+      const external = (await listQqProcesses()).filter(p => !String(p.commandline || '').includes('--type='));
+      return { ready: qqPortableReady(), running: !!pid || managed.running || !!external.length, pid: pid || managed.pid || external[0]?.pid || null,
+        managed: !!managed.running, detected: external.map(p => p.pid).slice(0, 4), dataDir: qqPortableDataDir(), dir: qqPortableDir() };
+    }
     return {
       ready: qqPortableReady(),
       running: pid !== null,
@@ -715,6 +808,18 @@ export function createApp({ log = console.log } = {}) {
   /** 拉起 SnowLuma。优先用发行包自带的 Node 直接运行（日志进内置控制台）；
    *  找不到运行时再回退到平台启动脚本（Windows launcher.bat / Linux launcher.sh）。 */
   async function launchSnowluma() {
+    if (getConfig().snowluma?.mode === 'external') return { ok: false, error: '当前使用外部协议端' };
+    if (isServerMode()) {
+      const started = await protocolService('snow', 'start');
+      if (!started.ok) return started;
+      let ready = false;
+      for (let i = 0; i < 30; i++) {
+        ready = await isPortOpen('127.0.0.1', snowlumaWebuiPort());
+        if (ready) break;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      return { ...started, ok: ready, launched: ready, managed: true, error: ready ? '' : 'SnowLuma 服务已启动，但 WebUI 尚未就绪，请查看服务日志' };
+    }
     const dir = snowlumaDir();
     if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
     // ⚠️ 端口探测必须用 WebUI 端口（2026-09-19）：WS 3001 是 OneBot 实例开的，
@@ -829,16 +934,18 @@ export function createApp({ log = console.log } = {}) {
   }
 
   const emit = (type, payload) => {
+    if (!sse.clients.size) return;
+    if (isServerMode() && type === 'session-update') { sse.emit(type, { ...payload, refresh: true }); return; }
     // 说明：这里曾经先走一个进程内事件总线（createEventBus），但全项目**没有任何订阅者**，
     // 属于纯空转；更糟的是它给人"存在进程内订阅者"的错觉。真正的消费者只有 SSE。
-    let line = null;
+    let data = payload ?? {};
     if (type === 'session-update' && payload?.sessionId) {
       try {
         // peek：只序列化、不修改，不需要 get() 那份全量 structuredClone
         // （运行中的会话每次更新都广播，克隆大会话会拖慢事件投递）
         const s = sessions?.peek(payload.sessionId);
         if (s) {
-          line = `event: ${type}\ndata: ${JSON.stringify({
+          data = {
             sessionId: s.id,
             chatKey: s.chatKey,
             startedAt: s.startedAt,
@@ -859,33 +966,36 @@ export function createApp({ log = console.log } = {}) {
             finishReason: s.finishReason ?? null,
             error: s.error ?? null,
             endedAt: s.endedAt ?? null
-          })}\n\n`;
+          };
         }
       } catch { /* 失败就退回原 payload */ }
     }
-    if (!line) line = `event: ${type}\ndata: ${JSON.stringify(payload ?? {})}\n\n`;
-    for (const res of sseClients) {
-      // 同步异常 + 已经不可写的连接都要清理，否则集合只增不减、每次都白写
-      if (res.writableEnded || res.destroyed) { sseClients.delete(res); continue; }
-      try {
-        res.write(line);
-      } catch {
-        sseClients.delete(res);
-      }
-    }
+    sse.emit(type, data);
   };
 
   // ── 组件 ──
   const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
+  onConstructionCleanup(() => store.close?.());
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
+  onConstructionCleanup(() => sessions.close?.());
   const onebot = new OneBotClient({
     wsUrl: cfg.snowluma?.wsUrl,
     httpUrl: cfg.snowluma?.httpUrl,
     accessToken: cfg.snowluma?.accessToken,
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
-    onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
+    maxPayload: (cfg.resources?.maxOnebotPayloadMB || 4) * 1024 * 1024,
+    onEvent: event => {
+      // Heartbeats are not durable work. Persist actionable events before any
+      // asynchronous parsing or model scheduling so a core restart can replay.
+      if (!['message', 'message_sent', 'notice'].includes(event?.post_type)) return;
+      const accepted = isServerMode() ? incoming.push(event) : incoming.push(() => handleOneBotEvent(event));
+      if (!accepted) {
+        const stats = incoming.stats();
+        if (stats.rejected % 100 === 1) log(`[ingest] 接入队列拒绝 ${stats.rejected} 个事件；已接收事件仍保留，请检查容量和失败记录`);
+      }
+    }
   });
   const stickers = new StickerManager(onebot);
   const sender =   new SendQueue({
@@ -898,22 +1008,22 @@ export function createApp({ log = console.log } = {}) {
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit, reminders, videoReader });
 
   // 远程价格表固定为官网公开地址；不从用户配置读取，避免被页面/配置篡改。
-  initPriceFeed(FIXED_PRICE_FEED_URL);
+  if (cfg.background?.priceFeed !== false) initPriceFeed(FIXED_PRICE_FEED_URL);
 
   // 云端统一屏蔽名单：启动先用 data 缓存，后台同步；网络失败不影响本地拦截。
-  const communitySyncTimer = startCommunitySync(log);
-  communitySyncTimer.unref?.();
+  const communitySyncTimer = cfg.background?.communitySync === false || isServerMode() ? null : startCommunitySync(log);
+  communitySyncTimer?.unref?.();
 
   // 前缀缓存保活：默认关闭（会主动联网），开关改动无需重启。
   // 放在这里是为了让它在 orchestrator / 插件加载之前就位 —— 保活构造前缀要用到
   // skillManager 的当前状态，而它晚于本行加载；所以首次 tick 延迟 20 秒兜住。
-  const cacheWarm = startCacheWarm(log);
+  const cacheWarm = cfg.background?.cacheWarm !== false ? startCacheWarm(log) : null;
 
   // 启动即预热（2026-09-20）：保活原先只能等"本次运行"构造出前缀才知道要预热什么，
   // 于是**每个会话的第一次调用永远赶不上预热**（实测 11:12:17 首次调用命中 32%，
   // 而预热 11:12:34 才发出）。这里在启动时载入上次运行落盘的前缀，直接暖一次 ——
   // 第一条群消息的调用就能命中。插件还没加载完，所以延迟 15 秒等 skillManager 就位。
-  {
+  if (cfg.background?.cacheWarm !== false) {
     const bootWarm = setTimeout(async () => {
       try {
         // 优先用落盘的前缀；没有（首次安装/刚清过数据）就从会话存档里借一份。
@@ -926,6 +1036,7 @@ export function createApp({ log = console.log } = {}) {
       } catch { /* 启动预热失败不影响任何功能 */ }
     }, 15000);
     bootWarm.unref?.();
+    backgroundTimers.add(bootWarm);
   }
 
   // OneBot 连接状态推送
@@ -1033,14 +1144,22 @@ export function createApp({ log = console.log } = {}) {
       bound: !!lastSnowlumaBinding?.bound,
       applied: !!lastSnowlumaBinding?.applied,
       error: String(lastSnowlumaBinding?.error || ''),
-      wsUrl: String(onebot.wsUrl || ''),
-      httpUrl: String(onebot.httpUrl || '')
+      wsUrl: redactUrl(onebot.wsUrl),
+      httpUrl: redactUrl(onebot.httpUrl)
     };
   }
 
   function applySnowlumaBindingInner({ reconnect = false } = {}) {
     let cfg;
     try { cfg = getConfig(); } catch { return { bound: false, applied: false }; }
+    if (cfg.snowluma?.mode === 'external') {
+      const changed = onebot.wsUrl !== cfg.snowluma.wsUrl || onebot.httpUrl !== cfg.snowluma.httpUrl;
+      onebot.wsUrl = cfg.snowluma.wsUrl; onebot.httpUrl = cfg.snowluma.httpUrl;
+      onebot.accessToken = cfg.snowluma.accessToken; onebot.httpToken = cfg.snowluma.httpAccessToken || cfg.snowluma.accessToken;
+      onebot.tokenCandidates = [];
+      if (changed && reconnect) onebot.reconnect();
+      return { bound: false, applied: true, mode: 'external', wsUrl: onebot.wsUrl, httpUrl: onebot.httpUrl };
+    }
     const wantUin = boundAccountUin();
 
     // 未绑定：回到配置里的地址（从"已绑定"改回来时走这条）
@@ -1102,6 +1221,7 @@ export function createApp({ log = console.log } = {}) {
 
   /** 把候选列表同步进配置 + 挂到 onebot 实例（不立即连接）。返回是否有变化。 */
   function syncSnowlumaTokens() {
+    if (getConfig().snowluma?.mode === 'external') return false;
     try {
       // 绑定了账号：令牌由 applySnowlumaBinding() 独占管理（只认该账号那一个）。
       // 这里若继续收集全候选并 applyTokens(candidates[0])，会按**文件序**拿到
@@ -1162,6 +1282,7 @@ export function createApp({ log = console.log } = {}) {
       const hit = cands.findIndex((c) => c.wsToken === cur.wsToken && c.httpToken === cur.httpToken);
       tokenCandidateIndex = hit >= 0 ? hit : 0;
       if (cands.length > 1) log('[onebot] 连接成功，当前令牌候选已生效');
+      if (isServerMode()) orchestrator.drainBacklogAfterResume();
       return;
     }
     if (String(status.error || '').includes('401')) maybeRecoverOnebot();
@@ -1202,9 +1323,17 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
-  async function ingestMessage(kind, id, event) {
+  async function ingestMessage(kind, id, event, context = {}) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
+    context.signal?.throwIfAborted();
+    const chatKey = `${kind}:${id}`;
+    const prior = (context.sourceEventKey && store.findBySourceEventKey(chatKey, context.sourceEventKey))
+      || (event.message_id != null && store.findByMid(chatKey, event.message_id));
+    if (prior) {
+      if (!prior.read && !prior.self) orchestrator.onIncoming(chatKey);
+      return;
+    }
 
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
@@ -1251,6 +1380,7 @@ export function createApp({ log = console.log } = {}) {
       }
     }
 
+    context.signal?.throwIfAborted();
     if (!text && !media.length) return;
 
     // ── 指令禁言：群内任何人 @机器人 + 发送指定指令 → 该群暂时固定 1 档（仅艾特）──
@@ -1259,7 +1389,8 @@ export function createApp({ log = console.log } = {}) {
       maybeTriggerCommandMute(id, text, event);
     }
 
-    store.appendIncoming(`${kind}:${id}`, {
+    store.appendIncoming(chatKey, {
+      sourceEventKey: context.sourceEventKey,
       mid: event.message_id,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
@@ -1326,11 +1457,15 @@ export function createApp({ log = console.log } = {}) {
     });
   }
 
-  async function ingestPoke(event) {    // OneBot v11: notice_type=notify, sub_type=poke；群拍 target_id，私聊拍自己
+  async function ingestPoke(event, context = {}) {    // OneBot v11: notice_type=notify, sub_type=poke；群拍 target_id，私聊拍自己
     const isGroup = event.group_id != null;
     const id = isGroup ? String(event.group_id) : String(event.user_id);
     const cfgNow = getConfig();
     if (!allowed(isGroup ? 'group' : 'private', id, cfgNow)) return;
+    context.signal?.throwIfAborted();
+    const chatKeyNow = `${isGroup ? 'group' : 'private'}:${id}`;
+    const prior = context.sourceEventKey && store.findBySourceEventKey(chatKeyNow, context.sourceEventKey);
+    if (prior) { if (!prior.read && !prior.self) orchestrator.onIncoming(chatKeyNow); return; }
 
     const operatorId = String(event.user_id ?? '');
     // 自己拍的拍（send_poke 的 OneBot 回显）不触发处理——与 message_sent 同理，发送时已留档
@@ -1345,8 +1480,8 @@ export function createApp({ log = console.log } = {}) {
     // 拍一拍也要记下真实群名片：原先这里硬编码"（拍一拍事件）"，
     // 会覆盖同一 QQ 在普通消息里的真实昵称 —— 记忆整理时取名字会拿到这个占位符，
     // 导致"317183522 的名字叫（拍一拍事件）"这种脏数据。
-    const chatKeyNow = `${isGroup ? 'group' : 'private'}:${id}`;
     let operatorName = isGroup ? ((await resolveAtName(id, operatorId)) || '') : '';
+    context.signal?.throwIfAborted();
     if (!operatorName) {
       const prior = (store.recent(chatKeyNow, { limit: 500 }) || [])
         .find((m) => !m.self && String(m.senderId) === operatorId
@@ -1371,10 +1506,12 @@ export function createApp({ log = console.log } = {}) {
     const text = operatorId === targetId
       ? `[拍一拍] ${opWithId} 拍了拍自己`
       : `[拍一拍] ${opWithId} 拍了拍 ${tgtWithId}`;
+    context.signal?.throwIfAborted();
     // 拍一拍是"轻量召唤"信号：作为触发批发给模型（isPoke 标记让档位判定
     // 按 1 档响应），但**不进【过去状态】历史**——buildPastState 会跳过 isPoke，
     // 存档里只留一条轻量记录（聊天记录页仍可见，模型历史里不出现）。
     store.appendIncoming(chatKeyNow, {
+      sourceEventKey: context.sourceEventKey,
       mid: null,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId: operatorId,
@@ -1387,17 +1524,19 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
   }
 
-  async function handleOneBotEvent(event) {
+  async function handleOneBotEvent(event, context = {}) {
+    context.signal?.throwIfAborted();
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
-      if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
-      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
-      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
+      const selfId = onebot.selfId || String(event.self_id ?? '');
+      if (event.post_type === 'message_sent' || (selfId && String(event.user_id ?? event.sender?.user_id ?? '') === selfId)) return;
+      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, context);
+      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, context);
       return;
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
-      return ingestPoke(event);
+      return ingestPoke(event, context);
     }
     // 撤回事件：群撤回 group_recall / 好友撤回 friend_recall
     // 用户撤回的消息，后续会话不再发给大模型（从存档里标记/删除）。
@@ -1487,24 +1626,11 @@ export function createApp({ log = console.log } = {}) {
   }
 
   function originAllowed(req) {
-    const host = String(req.headers.host ?? '');
-    if (!isLoopbackHostHeader(host)) return false;
-    const origin = String(req.headers.origin ?? '');
-    if (origin) {
-      try {
-        const u = new URL(origin);
-        return isLoopbackHostHeader(u.host) && u.host === host;
-      } catch { return false; }
-    }
-    const referer = String(req.headers.referer ?? '');
-    if (referer) {
-      try { return new URL(referer).host === host; } catch { return false; }
-    }
-    // 无来源信息（curl / 本机脚本 / 地址栏直达）—— 放行
-    return true;
+    return sameOriginAllowed(req, getConfig());
   }
 
   function authorize(req) {
+    if (auth) return auth.authorized(req);
     const token = String(getConfig().server?.token ?? '');
     if (!token) return true;
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -1624,45 +1750,77 @@ export function createApp({ log = console.log } = {}) {
     launchSnowluma, stopSnowluma,
     qqPortableStatus, qqPortableLogs, launchPortableQQ, stopPortableQQ,
     visionScan, isPortOpen,
-    buildUsageStats, buildUsageBreakdown,
+    buildUsageStats: options => buildUsageStats({ ...options, service: appUsage }),
+    buildUsageBreakdown: options => buildUsageBreakdown({ ...options, service: appUsage }),
     peerSnapshot: peerMonitor.snapshot,
     reloadSkills,
     // 账号绑定（多账号 / 双实例切换）：
     // 漏传这几个会让 /api/onebot/accounts 恒返回空列表、绑定状态恒为空串 ——
     // 而且因为 routes.js 侧用的是 `typeof x === 'function'` 存在性检查，
     // 症状是"接口 200 但什么都不报"，很难从日志看出是依赖没注入。
-    applySnowlumaBinding, snowlumaAccounts, probeAccount, boundAccountUin, snowlumaBindingStatus
+    applySnowlumaBinding, snowlumaAccounts, probeAccount, boundAccountUin, snowlumaBindingStatus,
+    protocolDiagnostics: () => diagnoseSnowluma(snowlumaDir()), protocolService
+  });
+  const snowProxy = createSnowlumaProxy({ getPort: snowlumaWebuiPort, getDir: snowlumaDir, authorize, originAllowed,
+    enabled: () => isServerMode() && getConfig().snowluma?.mode !== 'external' });
+  const desktopProxy = createDesktopProxy({ authorize, originAllowed,
+    enabled: () => isServerMode() && getConfig().server?.desktopProxy === true });
+  onConstructionCleanup(() => { snowProxy.close(); desktopProxy.close(); });
+  server.on('upgrade', (req, socket, head) => {
+    // The HTTP parser accepts malformed absolute request targets. Reject URL
+    // parsing failures here so unauthenticated upgrades cannot exit the core.
+    socket.on('error', () => socket.destroy());
+    try {
+      new URL(req.url, 'http://127.0.0.1');
+      if (desktopProxy.upgrade(req, socket, head)) return;
+      if (!snowProxy.upgrade(req, socket, head)) socket.destroy();
+    } catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    }
   });
 
   async function handleHttp(req, res) {
-    const url = new URL(req.url, 'http://127.0.0.1');
+    let url;
+    try { url = new URL(req.url, 'http://127.0.0.1'); }
+    catch {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', 'connection': 'close' });
+      res.end('Bad Request'); return;
+    }
     const pathname = url.pathname;
+    if (auth && await auth.handle(req, res, pathname, { json, readBody, originAllowed })) {
+      if (pathname === '/api/auth/logout' || pathname === '/api/auth/password') { snowProxy.revalidate(); desktopProxy.revalidate(); }
+      return;
+    }
+    if (auth && !authorize(req) && !['/login.html', '/login.js', '/login.css', '/favicon.ico'].includes(pathname)) {
+      if (pathname.startsWith('/api/')) return json(res, 401, { error: '请先登录控制台' });
+      res.writeHead(302, { location: '/login.html', 'cache-control': 'no-store' }); res.end(); return;
+    }
+    if (await snowProxy.handle(req, res)) return;
+    if (desktopProxy.handle(req, res)) return;
+    if (pathname === '/api/runtime/incoming/retry' && req.method === 'POST') {
+      if (!authorize(req)) return json(res, 401, { error: '未授权' });
+      if (!originAllowed(req)) return json(res, 403, { error: '请求来源不被信任' });
+      if (!isServerMode()) return json(res, 409, { error: '当前模式没有持久事件队列' });
+      const body = await readBody(req);
+      const limit = Number(body.limit ?? 100);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return json(res, 400, { error: '重试数量必须为 1–100' });
+      return json(res, 200, { retried: incoming.retryFailed(limit), incoming: incoming.stats() });
+    }
+    if (pathname === '/api/runtime' && req.method === 'GET') {
+      if (!authorize(req)) return json(res, 401, { error: '未授权' });
+      if (!originAllowed(req)) return json(res, 403, { error: '请求来源不被信任' });
+      return json(res, 200, { mode: isServerMode() ? 'server' : 'desktop', preset: process.env.QQ_AGENT_PRESET || '',
+        node: process.version, memory: process.memoryUsage(), uptime: process.uptime(),
+        eventLoop: { p99Ms: loopDelay.percentile(99) / 1e6, maxMs: loopDelay.max / 1e6 },
+        incoming: incoming.stats(), sse: { clients: sse.clients.size, dropped: sse.dropped },
+        store: store.stats?.() || { backend: store.backend || 'json' }, extensions: { bundled: false } });
+    }
 
     // SSE
     if (pathname === '/api/events' && req.method === 'GET') {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       if (!originAllowed(req)) return json(res, 403, { error: '请求来源不被信任' });
-      res.writeHead(200, {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive'
-      });
-      res.write(`event: hello\ndata: {}\n\n`);
-      sseClients.add(res);
-      // 心跳：半开 TCP（拔网线 / NAT 超时，没有 FIN）不会触发 req 'close'，
-      // 少了心跳这些客户端会永久留在 sseClients 里，之后每次 emit 都白写一遍。
-      const heartbeat = setInterval(() => {
-        try { res.write(': ping\n\n'); } catch { /* 下面 error/close 会清理 */ }
-      }, 15000);
-      heartbeat.unref?.();
-      const cleanup = () => {
-        clearInterval(heartbeat);
-        sseClients.delete(res);
-      };
-      // 异步写错误不会走 try/catch，必须显式兜住，否则会变成 uncaughtException
-      res.on('error', cleanup);
-      res.on('close', cleanup);
-      req.on('close', cleanup);
+      if (!sse.add(req, res)) return json(res, 503, { error: '控制台实时连接已达上限' });
       return;
     }
 
@@ -1786,7 +1944,7 @@ export function createApp({ log = console.log } = {}) {
   async function listenOn(port) {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, '127.0.0.1', () => {
+      server.listen(port, getConfig().server?.bindHost || '127.0.0.1', () => {
         server.off('error', reject);
         resolve(port); // 必须把实际端口传回去，Electron 壳要用它加载页面
       });
@@ -1794,6 +1952,7 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function start() {
+    await auth?.init(log);
     // ── 启动顺序（2026-09-18 按耗时画像重排）────────────────────────────
     // 旧顺序的瓶颈：HTTP → 遥测 → Skill加载(串行import) → SnowLuma启动(最长20s等端口)
     //              → OneBot连接 → 就绪日志。Skill 与 SnowLuma 互不依赖却串行，
@@ -1804,7 +1963,7 @@ export function createApp({ log = console.log } = {}) {
     const basePort = Number(getConfig().server?.port) || 3210;
     let port = null;
     let lastError = null;
-    for (let p = basePort; p < basePort + 10; p++) {
+    for (let p = basePort; p < basePort + (getConfig().server?.strictPort ? 1 : 10); p++) {
       try {
         port = await listenOn(p);
         break;
@@ -1816,7 +1975,7 @@ export function createApp({ log = console.log } = {}) {
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
     // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
-    startTelemetryLoop(log);
+    if (getConfig().background?.telemetry !== false) stopTelemetry = startTelemetryLoop(log);
 
     // 对端实例联动（server.peer）：配置启用才真正开始轮询（probe 内部按配置
     // 短路，未启用只推一条 configured:false）。放在 listen 成功之后。
@@ -1830,12 +1989,12 @@ export function createApp({ log = console.log } = {}) {
     //（2290 个 / 178MB 实测 1.3~1.9 秒）。启动后台先预热一次（collectUsageRows
     // 内部分片让步，不阻塞事件循环），用户点开用量页时档案已就绪，
     // 只剩窗口过滤（毫秒级）。不 await；失败静默（用量页会自己再算）。
-    collectUsageRows({ range: '7' }).catch(() => {});
+    if (!isServerMode() && getConfig().background?.usageWarm !== false) collectUsageRows({ range: '7' }).catch(() => {});
 
     // ── Skill 加载 与 SnowLuma 拉起并行（互不依赖）──
     // 本地 MongoDB 也在这一棒拉起：kb-growth/memory-growth 的候选入库、AutoApprove、
     // TTL 过期清理需要它。先起 Mongo 再加载插件，首次探活即可连上；起不来静默降级。
-    const mongoReady = ensureLocalMongod();
+    const mongoReady = getConfig().background?.mongoAutoStart === true ? ensureLocalMongod() : Promise.resolve();
     const skillsReady = (async () => {
       try {
         await mongoReady;
@@ -1866,7 +2025,7 @@ export function createApp({ log = console.log } = {}) {
     })();
 
     const snowlumaReady = (async () => {
-      if (!getConfig().snowluma?.autoLaunch) return;
+      if (getConfig().snowluma?.mode === 'external' || !getConfig().snowluma?.autoLaunch) return;
       try {
         // 等待就绪用 WebUI 端口（进程即起即听）；OneBot WS 端口要等账号登录，
         // 在这里等 3001 是"永远等不到"的（没人扫码就一直挂着 20 秒）。
@@ -1897,6 +2056,10 @@ export function createApp({ log = console.log } = {}) {
       // accessToken/httpToken 已由 applyTokens 直接挂到实例（候选[0]）
     }
     await onebot.connect();
+    if (isServerMode()) incoming.start((event, context) => handleOneBotEvent(event, { ...context, sourceEventKey: `inbox:${context.instanceId}:${context.id}` }));
+    // An event can be acknowledged after storing its unread message but before
+    // the model run starts. Rebuild the bounded wake queue from persisted data.
+    if (isServerMode()) orchestrator.drainBacklogAfterResume();
 
     // ── OneBot 端口就绪轮询（2026-09-19）────────────────────────────────────
     // WS 3001 只有「QQ 登录 → Hook 检出 → OneBot 实例拉起」后才监听。常见时序：
@@ -1907,10 +2070,11 @@ export function createApp({ log = console.log } = {}) {
     // connectLoop 的代际互斥，不会产生并发连接）。已连接后轮询自动停止；
     // 断线（SnowLuma 重启等）时轮询自动恢复 —— 恢复延迟从"最多 30 秒"降到
     // "最多 2 秒 + 一次连接建立"。
-    const obWsPort = snowlumaWsPort();
     obPortPollTimer = setInterval(async () => {
       if (onebot.connected) return;          // 连着：无事可做（轮询本身极廉价）
-      const open = await isPortOpen('127.0.0.1', obWsPort);
+      const endpoint = protocolEndpoint(onebot.wsUrl);
+      if (!endpoint || getConfig().snowluma?.mode === 'external') return;
+      const open = await isPortOpen(endpoint.host, endpoint.port);
       if (open && !onebot.connected) {
         // 端口从关到开：立即重连（reconnect 会重置退避，秒级恢复）
         onebot.reconnect();
@@ -1922,7 +2086,7 @@ export function createApp({ log = console.log } = {}) {
     // open 时的 get_login_info 失败 → selfInfo 恒空 → UI"检测不到账号"。
     // onebot.js 里已有 15 秒延迟补拉；这里再挂一道 45 秒后的终检：
     // 连着但仍没有 selfInfo 就强制补一次并广播状态（长期运行的兜底，幂等）。
-    setTimeout(() => {
+    const loginRetryTimer = setTimeout(() => {
       if (!onebot.connected || onebot.selfInfo) return;
       onebot.call('get_login_info').then((info) => {
         if (info) {
@@ -1932,24 +2096,27 @@ export function createApp({ log = console.log } = {}) {
         }
       }).catch(() => { /* 仍失败：连接层已尽力，UI 状态如实反映 */ });
     }, 45_000).unref?.();
+    backgroundTimers.add(loginRetryTimer);
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startReminderLoop();   // 提醒（闹钟）调度：到点往群里发提醒
-    log(`控制台已就绪：http://127.0.0.1:${port}`);
+    log(`控制台已就绪：http://${getConfig().server?.publicHost || `${getConfig().server?.bindHost || '127.0.0.1'}:${port}`}`);
 
     // ── 用量档案后台预热（2026-09-22）────────────────────────────────────
     // 首次打开用量页要先把全部会话文件解析一遍（实测 170MB ≈ 3.1 秒）——
     // 启动后闲置时先付掉，用户点「今日」就不用等。延迟 8 秒避开启动高峰
     // （插件加载 / 价格表 / 遥测都挤在头几秒），解析本身分片让步不阻塞事件循环。
     const usageWarmTimer = setTimeout(() => {
+      if (isServerMode() || getConfig().background?.usageWarm === false) return;
       warmUsageArchive()
         .then((r) => { if (r) log(`[usage] 用量档案已后台预热（${r.files} 个会话，${r.ms}ms）`); })
         .catch((error) => log(`[usage] 后台预热失败（首次打开用量页时会现场重算）：${error?.message ?? error}`));
     }, 8000);
     usageWarmTimer.unref?.();
+    backgroundTimers.add(usageWarmTimer);
     // 打印**实际生效**的地址（onebot 实例上的），而不是配置里的兜底值 ——
     // 绑定账号时两者不同，看配置值会让人误以为连错了端口。
-    log(`OneBot（SnowLuma）: ws=${onebot.wsUrl} http=${onebot.httpUrl}${boundAccountUin() ? `（已绑定账号 ${boundAccountUin()}）` : ''}`);
-    log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
+    log(`OneBot: ws=${redactUrl(onebot.wsUrl)} http=${redactUrl(onebot.httpUrl)}${boundAccountUin() ? `（已绑定账号 ${boundAccountUin()}）` : ''}`);
+    log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${redactUrl(getConfig().api.baseUrl)}`);
     return port;
   }
 
@@ -1983,27 +2150,38 @@ export function createApp({ log = console.log } = {}) {
     return result;
   }
 
-  async function stop() {
+  let stopPromise;
+  function stop() { return stopPromise ||= stopInternal(); }
+  async function stopInternal() {
+    // Close admission and abort network work synchronously. Active sends and
+    // tools must finish their continuations before closing SQLite or the lock.
+    const onebotStopped = onebot.close();
+    const senderStopped = sender.close();
+    const orchestratorStopped = orchestrator.abortAll();
+    for (const timer of backgroundTimers) clearTimeout(timer);
+    stopTelemetry?.();
+    removeLogListener?.();
+    loopDelay.disable();
     // 先停掉热重载 watcher：否则 stop() 之后文件变动仍会触发重载 + 广播
     try { pluginWatcher?.close?.(); } catch { /* ignore */ }
     pluginWatcher = null;
-    await orchestrator.abortAll();
     orchestrator.stopReminderLoop();
     if (communitySyncTimer) clearInterval(communitySyncTimer);
     try { cacheWarm?.stop?.(); } catch { /* ignore */ }
     if (obPortPollTimer) clearInterval(obPortPollTimer);
-    // 索引缓存立刻落盘：正常运行中靠防抖（5s），退出前必须写一次，
-    // 否则最后的会话变动丢失、下次启动要靠后台对账补（慢路径）
-    sessions.flushIndexCache();
     // 关闭所有 SSE 长连接，避免 server.close() 一直等它们
-    for (const c of [...sseClients]) {
-      try { c.end(); } catch { /* ignore */ }
-    }
-    sseClients.clear();
-    onebot.close();
-    server.close();
-    // 对端监测器：停止轮询（下次 start 会重开）
+    sse.close();
+    snowProxy.close();
+    desktopProxy.close();
+    auth?.close();
+    const httpStopped = new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
     try { peerMonitor.stop(); } catch { /* ignore */ }
+    await Promise.all([onebotStopped, senderStopped, orchestratorStopped, incoming.close(), appUsage?.close(), httpStopped]);
+    await incoming.waitSettled?.();
+    // Persist the final state after all tools and sends have finished recording.
+    sessions.flushIndexCache();
+    store.close?.();
+    await sessions.close?.();
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
     // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
     // 下次启动会读到完整文件。
@@ -2014,7 +2192,7 @@ export function createApp({ log = console.log } = {}) {
     //    所以这里 SIGTERM 后用 exit 事件确认；2 秒仍未退出就 SIGKILL。
     try {
       const proc = snowlumaProc;
-      if (proc && proc.exitCode === null && proc.signalCode === null) {
+      if (!isServerMode() && !getConfig().snowluma?.independent && proc && proc.exitCode === null && proc.signalCode === null) {
         proc.kill('SIGTERM');
         const exited = await new Promise((resolve) => {
           const timer = setTimeout(() => resolve(false), 2000);
@@ -2785,8 +2963,25 @@ function resetUsageStatsCache() {
   usageStatsMicro = { key: '', at: 0, stats: null };
 }
 
-async function buildUsageStats({ range = '7', force = false } = {}) {
+async function buildUsageStats({ range = '7', force = false, service = null } = {}) {
   const key = String(range);
+  if (isServerMode()) {
+    // Keep only one short-lived result. History and price aggregation stay in
+    // the bounded worker; arbitrary ranges cannot grow the main-thread cache.
+    if (!force && usageStatsMicro.service === service && usageStatsMicro.stats && usageStatsMicro.key === key
+        && Date.now() - usageStatsMicro.at < USAGE_STATS_MICRO_TTL_MS) return usageStatsMicro.stats;
+    if (usageStatsInflight?.key === key && usageStatsInflight.service === service) return usageStatsInflight.promise;
+    if (!service) throw new Error('用量服务尚未启动');
+    const promise = service.query('stats', { range });
+    usageStatsInflight = { key, promise, service };
+    try {
+      const stats = await promise;
+      usageStatsMicro = { key, at: Date.now(), stats, service };
+      return stats;
+    } finally {
+      if (usageStatsInflight?.promise === promise) usageStatsInflight = null;
+    }
+  }
   // force 必须**同时**绕过两层缓存。踩过的坑：微缓存判定写在前面却没看 force，
   // 于是"点刷新"在两次请求间隔 <5 秒时直接吃微缓存 —— 结果是刷新按钮按下去
   // 数字纹丝不动（实测 computedAt 完全不变），比慢更让人困惑。
@@ -2864,7 +3059,11 @@ async function buildUsageStats({ range = '7', force = false } = {}) {
  *   dim/key 定位子集，by 决定展开方式
  * 例：dim=chat&key=group:123&by=model → 该群下各模型的成本
  */
-async function buildUsageBreakdown({ range = '7', dim = '', key = '', by = '' } = {}) {
+async function buildUsageBreakdown({ range = '7', dim = '', key = '', by = '', service = null } = {}) {
+  if (isServerMode()) {
+    if (!service) throw new Error('用量服务尚未启动');
+    return service.query('breakdown', { range, dim, key, by });
+  }
   const { rows, win } = await collectUsageRows({ range });
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
   // dim/by 为 model 时按复合身份匹配（模型 + 供应商）

@@ -1,0 +1,26 @@
+[Unit]
+Description=QQ Agent Linux QQ client (optional)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@QQ_DIR@
+Environment=HOME=@HOME@
+Environment=DISPLAY=:99
+ExecStart=@QQ_EXEC@ @QQ_ARGS@
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@QQ_DATA@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

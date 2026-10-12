@@ -1,5 +1,13 @@
 // 〔SnowLuma 页签〕——M9 拆分第 4 段
 'use strict';
+let qqDesktopOpened = false;
+function protocolUiLink(raw) {
+  try {
+    const base = window.location?.origin || 'http://127.0.0.1';
+    const url = new URL(String(raw || ''), base);
+    return ['http:', 'https:'].includes(url.protocol) ? String(raw || '') : '';
+  } catch { return ''; }
+}
 // ── SnowLuma 独立页签 ──
 /**
  * 只刷新 SnowLuma 的日志区（不重建整个页面）。
@@ -66,12 +74,23 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       return;
     }
     const s = status;
-    const running = !!(s.snowluma?.running);
+    const protocol = s.snowluma || {};
+    const external = protocol.mode === 'external';
+    const running = !!protocol.running;
+    const webuiReachable = !!protocol.webuiReachable;
+    const managed = !!protocol.managed;
+    const detected = Array.isArray(protocol.detected) ? protocol.detected : [];
+    const diagnostics = protocol.diagnostics || null;
     const onebotConnected = !!s.onebot?.connected;
-    const dir = s.snowluma?.dir || '';
-    const embedded = !!s.snowluma?.embedded;
-    const pid = s.snowluma?.pid ?? null;
-    const webuiUrl = s.snowluma?.webuiUrl || '';
+    const dir = protocol.dir || '';
+    const embedded = !!protocol.embedded;
+    const pid = protocol.pid ?? null;
+    const webuiUrl = protocolUiLink(protocol.webuiUrl);
+    const desktop = s.desktop || {};
+    const desktopEnabled = desktop.enabled === true;
+    // Service status remains authoritative after a refresh or automatic timeout.
+    const desktopRunning = typeof desktop.running === 'boolean' ? desktop.running : qqDesktopOpened;
+    qqDesktopOpened = desktopRunning;
     // 便携 QQ 状态
     const qq = s.qqPortable || {};
     const qqReady = !!qq.ready;
@@ -107,41 +126,53 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
 
     // 总体状态：三层（QQ 内核 → SnowLuma → OneBot）任一层断了机器人都不会回消息，
     // 所以页头给一个"一句话结论"，细节留给下面的状态块。
-    const overall = onebotConnected ? 'ok' : ((qqRunning || running) ? 'warn' : 'off');
-    const overallText = overall === 'ok' ? '机器人工作中' : (overall === 'warn' ? '部分就绪' : '未启动');
+    const overall = onebotConnected ? 'ok' : ((qqRunning || running || webuiReachable) ? 'warn' : 'off');
+    const overallText = overall === 'ok' ? '机器人工作中' : (overall === 'warn' ? '部分就绪' : (external ? '等待外部协议端' : '未启动'));
 
     box.innerHTML = `
       <div class="snowluma-page-card">
         <div class="sl-head">
           <div class="sl-head-main">
             <h2>SnowLuma（OneBot 网关）</h2>
-            <div class="sl-head-sub">QQ 内核 → SnowLuma → OneBot，三层全部就绪机器人才会回消息</div>
+            <div class="sl-head-sub">${external ? '连接用户配置的外部 OneBot 协议端' : 'QQ → SnowLuma → OneBot，完成登录与协议配置后可收发消息'}</div>
           </div>
           <span class="sl-chip is-${overall}"><span class="sl-chip-dot"></span>${overallText}</span>
         </div>
 
-        <!-- 一键启动区域（核心入口）：连接成功后就收起来，不再占版面 -->
-        ${!onebotConnected ? `
+        <!-- 外部协议端由外部服务管理，页面不显示本机 QQ/SnowLuma 启停按钮。 -->
+        ${!external && !onebotConnected ? `
         <div class="sl-quick quick-start-section">
           <div class="sl-quick-head">
             <span class="sl-quick-title">快速启动</span>
             <span class="sl-quick-step">按顺序自动完成：启动 QQ → 启动 SnowLuma → 连接 OneBot</span>
           </div>
           <div class="sl-quick-body muted">
-            ${!qqReady ? '便携 QQ 未安装，请先运行 <code>npm run setup</code>' :
-              !qqRunning ? '点击下面按钮，自动完成：启动 QQ → 启动 SnowLuma → 连接 OneBot' :
+            ${!qqReady ? '未检测到 QQ 客户端，请按服务器安装文档安装 Linux QQ。' :
+              !qqRunning ? '点击下面按钮启动 QQ 与协议端，再由你完成 QQ 扫码登录。' :
               !running ? 'QQ 已运行，点击启动 SnowLuma 并连接' :
               'SnowLuma 已运行，等待 OneBot 连接…'}
           </div>
           <div class="sl-quick-actions">
             <button class="btn btn-primary" id="quick-start-btn" ${!qqReady ? 'disabled' : ''}>
-              ${!qqReady ? '请先运行 npm run setup' :
+              ${!qqReady ? '请先安装 QQ' :
                 !qqRunning ? '一键启动（QQ + SnowLuma）' :
                 !running ? '启动 SnowLuma' :
                 '等待连接…'}
             </button>
             <span id="quick-start-hint" class="sl-hint"></span>
           </div>
+        </div>` : ''}
+
+        ${external ? `<div class="sl-section">
+          <div class="sl-section-title">外部协议端</div>
+          <div class="hint">QQA 不会启动、停止或自动登录外部协议端。请在协议端自己的管理入口完成 QQ 登录、Hook 加载和协议确认。</div>
+        </div>` : ''}
+
+        ${diagnostics ? `<div class="sl-section">
+          <div class="sl-section-title">协议端诊断</div>
+          <div class="hint">${diagnostics.installed === false ? '未检测到匹配的 SnowLuma 安装。' : (diagnostics.state === 'configuration-present' ? '已检测到配置，仍需确认 WebUI 和 OneBot 实际可达。' : '需要完成以下配置步骤：')}</div>
+          ${(diagnostics.steps || []).length ? `<ol class="sl-diagnostic-steps">${diagnostics.steps.map((step) => `<li>${esc(step)}</li>`).join('')}</ol>` : '<div class="hint">未发现待处理的配置步骤。</div>'}
+          ${diagnostics.mustChangePassword ? `<div class="sl-password-box"><button class="btn btn-small" id="sl-initial-password-btn">读取 SnowLuma 初始密码</button><span id="sl-initial-password" class="sl-hint"></span></div>` : ''}
         </div>` : ''}
 
         <!-- 运行状态：三层各一块，比一长串文字行好扫 -->
@@ -153,8 +184,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
                 <span class="dot ${qqRunning ? 'dot-on' : 'dot-off'}"></span>
                 <span class="sl-tile-name">QQ 内核</span>
               </div>
-              <div class="sl-tile-value">${qqRunning ? '运行中' : (qqReady ? '未启动' : '未安装')}${qqPid ? `<em>pid ${qqPid}</em>` : ''}</div>
-              <div class="sl-tile-foot" title="${esc(qq.dir || '')}">${qqReady ? esc(qq.dir || '未找到便携 QQ 目录') : '需先运行 npm run setup 安装便携 QQ'}</div>
+              <div class="sl-tile-value">${external ? '由外部协议端管理' : (qqRunning ? '运行中' : (qqReady ? '未启动' : '未安装'))}${qqPid ? `<em>pid ${qqPid}</em>` : ''}</div>
+              <div class="sl-tile-foot" title="${esc(qq.dir || '')}">${external ? '在外部协议端完成登录' : (qqReady ? esc(qq.dir || 'QQ 已安装') : '未检测到 QQ，请按安装文档安装')}</div>
             </div>
 
             <div class="sl-tile ${running ? 'is-on' : ''}">
@@ -162,11 +193,13 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
                 <span class="dot ${running ? 'dot-on' : 'dot-off'}"></span>
                 <span class="sl-tile-name">SnowLuma</span>
               </div>
-              <div class="sl-tile-value">${running ? '运行中' : '未运行'}${pid ? `<em>pid ${pid}</em>` : ''}</div>
-              <div class="sl-tile-foot" title="${esc(dir || '')}">${embedded ? '内置模式（随 QQ Agent 退出）' : (running ? '独立模式' : (dir ? esc(dir) : '未找到项目内 snowluma/ 文件夹'))}</div>
+              <div class="sl-tile-value">${external ? '由外部协议端管理' : (webuiReachable ? 'WebUI 可达' : 'WebUI 不可达')}${pid ? `<em>pid ${pid}</em>` : ''}</div>
+              <div class="sl-tile-foot" title="${esc(dir || '')}">${external ? (managed ? '外部服务由系统管理' : (detected.length ? `检测到外部进程（${detected.length}）` : '未检测到外部进程')) : (managed ? 'QQA 托管服务' : (detected.length ? `检测到进程（${detected.length}）` : (embedded ? '内置模式（随 QQ Agent 退出）' : (dir ? esc(dir) : '未找到项目内 snowluma/ 文件夹'))))}</div>
               <div class="sl-tile-foot">${webuiUrl
-                ? `<button class="sl-link-btn" id="sl-open-webui-btn" title="在浏览器中打开 SnowLuma 控制台">${esc(webuiUrl)} ↗</button>`
-                : '<span class="sl-tile-none">WebUI 启动后自动识别</span>'}</div>
+                ? `<a class="sl-link-btn" id="sl-open-webui-link" href="${esc(webuiUrl)}" target="_blank" rel="noopener noreferrer" title="在新标签页打开 SnowLuma 控制台">${esc(webuiUrl)} ↗</a>`
+                : (protocol.proxySupported === false && Number(protocol.tunnelPort) > 0
+                  ? `<span class="sl-tile-none">此 SnowLuma 版本尚未验证页面代理。请通过 SSH 本地转发访问服务器的 127.0.0.1:${esc(protocol.tunnelPort)}，或升级至 1.14.22。</span>`
+                  : '<span class="sl-tile-none">WebUI 地址未提供</span>')}</div>
             </div>
 
             <div class="sl-tile ${onebotConnected ? 'is-on' : ''}">
@@ -182,7 +215,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
           </div>
         </div>
 
-        <!-- 操作：按"内核 / 协议端"分组，危险动作是红按钮，次要动作是小白按钮 -->
+        <!-- 操作：外部协议端不显示本机启停；服务器临时 QQ 窗口由 desktopProxy 单独控制。 -->
+        ${!external ? `
         <div class="sl-section">
           <div class="sl-section-title">操作</div>
           <div class="sl-actions-row">
@@ -205,6 +239,21 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
             </div>
           </div>
         </div>
+        ` : ''}
+
+        ${desktopEnabled ? `<div class="sl-section">
+          <div class="sl-section-title">服务器临时 QQ 登录窗口</div>
+          <div class="hint">仅在需要扫码或首次配置时打开。QQA 不会自动扫码或确认协议。</div>
+          <div class="sl-actions-row">
+            <span class="sl-actions-label">桌面窗口</span>
+            <div class="snowluma-actions">
+              <button class="btn btn-small" id="qq-desktop-open-btn" ${desktopRunning ? 'disabled' : ''}>${desktopRunning ? '已打开' : '打开窗口'}</button>
+              <button class="btn btn-small btn-danger" id="qq-desktop-close-btn" ${typeof desktop.running === 'boolean' && !desktopRunning ? 'disabled' : ''}>关闭窗口</button>
+              <span id="qq-desktop-hint" class="sl-hint"></span>
+              ${desktopRunning ? '<a href="/qq-desktop" target="_blank" rel="noopener noreferrer">进入 QQ 窗口 ↗</a>' : ''}
+            </div>
+          </div>
+        </div>` : ''}
 
         <!-- 日志：三条独立面板，各带标题栏。空日志居中提示，不再是"一大片黑框"。
              应用日志：logger.js 的内存环形缓冲 + data/logs/ 落盘文件。 -->
@@ -253,6 +302,43 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     if (newPre) newPre.scrollTop = prevScroll ? (prevScroll.atBottom ? newPre.scrollHeight : prevScroll.top) : newPre.scrollHeight;
     const newAppPre = box.querySelector('#app-logs-view');
     if (newAppPre) newAppPre.scrollTop = prevAppScroll ? (prevAppScroll.atBottom ? newAppPre.scrollHeight : prevAppScroll.top) : newAppPre.scrollHeight;
+
+    const initialPasswordBtn = $('#sl-initial-password-btn');
+    if (initialPasswordBtn) initialPasswordBtn.addEventListener('click', async () => {
+      const out = $('#sl-initial-password');
+      initialPasswordBtn.disabled = true;
+      if (out) out.textContent = '读取中…';
+      try {
+        const r = await api('/api/snowluma/initial-password', { method: 'POST', body: '{}' });
+        if (out) out.textContent = r.password ? `管理员：${r.user || r.admin || 'admin'}，密码：${r.password}` : (r.error || '当前无需读取初始密码');
+      } catch (e) { if (out) out.textContent = `读取失败：${e.message}`; }
+      finally { initialPasswordBtn.disabled = false; }
+    });
+
+    const desktopOpenBtn = $('#qq-desktop-open-btn');
+    const desktopCloseBtn = $('#qq-desktop-close-btn');
+    const desktopHint = $('#qq-desktop-hint');
+    if (desktopOpenBtn) desktopOpenBtn.addEventListener('click', async () => {
+      desktopOpenBtn.disabled = true;
+      if (desktopHint) desktopHint.textContent = '正在打开…';
+      try {
+        const r = await api('/api/qq-desktop/open', { method: 'POST', body: '{}' });
+        qqDesktopOpened = r.running === undefined ? !!r.ok : r.running === true;
+        if (qqDesktopOpened && desktopHint) desktopHint.innerHTML = '已打开：<a href="/qq-desktop" target="_blank" rel="noopener noreferrer">进入 QQ 窗口 ↗</a>';
+        else if (desktopHint) desktopHint.textContent = r.error || '打开失败';
+      } catch (e) { if (desktopHint) desktopHint.textContent = `打开失败：${e.message}`; }
+      setTimeout(() => loadSnowlumaPage({ quiet: true }), 700);
+    });
+    if (desktopCloseBtn) desktopCloseBtn.addEventListener('click', async () => {
+      desktopCloseBtn.disabled = true;
+      if (desktopHint) desktopHint.textContent = '正在关闭…';
+      try {
+        const r = await api('/api/qq-desktop/close', { method: 'POST', body: '{}' });
+        if (r.ok) qqDesktopOpened = false;
+        if (desktopHint) desktopHint.textContent = r.ok ? '已请求关闭窗口。' : (r.error || '关闭失败');
+      } catch (e) { if (desktopHint) desktopHint.textContent = `关闭失败：${e.message}`; }
+      setTimeout(() => loadSnowlumaPage({ quiet: true }), 700);
+    });
 
     // ── 应用日志：级别切换 + 手动刷新 ──
     const appLevelSel = $('#app-log-level');
@@ -360,7 +446,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
     });
 
-    $('#sl-start-btn').addEventListener('click', async () => {
+    $('#sl-start-btn')?.addEventListener('click', async () => {
       const btn = $('#sl-start-btn');
       btn.disabled = true; btn.textContent = '启动中…';
       $('#sl-hint').textContent = '';
@@ -372,7 +458,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       }
       setTimeout(() => loadSnowlumaPage({ quiet: true }), 2500);
     });
-    $('#sl-stop-btn').addEventListener('click', async () => {
+    $('#sl-stop-btn')?.addEventListener('click', async () => {
       const btn = $('#sl-stop-btn');
       btn.disabled = true; btn.textContent = '关闭中…';
       $('#sl-hint').textContent = '';
@@ -384,19 +470,10 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       }
       setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
     });
-    $('#sl-refresh-btn').addEventListener('click', () => loadSnowlumaPage());
-    $('#sl-open-folder-btn').addEventListener('click', async () => {
-      try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
+    $('#sl-refresh-btn')?.addEventListener('click', () => loadSnowlumaPage());
+    $('#sl-open-folder-btn')?.addEventListener('click', async () => {
+      try { const r = await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); if (r.remote) $('#sl-hint').textContent = `服务器目录：${r.dir}`; }
       catch (e) { $('#sl-hint').textContent = `失败：${e.message}`; }
-    });
-    const webuiBtn = $('#sl-open-webui-btn');
-    if (webuiBtn) webuiBtn.addEventListener('click', async () => {
-      try {
-        const r = await api('/api/snowluma/open-webui', { method: 'POST', body: '{}' });
-        if (!r.ok) $('#sl-hint').textContent = r.error;
-      } catch (e) {
-        $('#sl-hint').textContent = `打开失败：${e.message}`;
-      }
     });
   } catch (e) {
     if (!quiet) console.error(e);
