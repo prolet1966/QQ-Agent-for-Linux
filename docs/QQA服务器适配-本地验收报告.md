@@ -7,6 +7,7 @@
 | 验收范围 | **源码 + 本地验收**：源码完整性、静态校验、测试套件（Windows 本机 + Linux CI）、发布包重建与可复现性 |
 | 明确排除 | **不连接 `47.109.97.184` ECS，不做任何线上部署、重启或变更** |
 | 验收日期 | 2026-10-12 |
+| Linux 侧验收 | 另见 **`docs/QQA服务器适配-WSL-Linux侧验收报告.md`**（WSL2 真 Linux：systemd 托管安装、安装失败回滚、组件 socket、cgroup 限制下端到端压测） |
 | 本地源码基线 | `C:/Users/kmy/WorkBuddy/2026-10-12-13-59-08/qqa/repo`（= 样本 `QQA/源码/`），基线提交 `da6f056`，本分支提交 `aa714d3` |
 
 > **路径与称谓约定**（本报告后来入库到 `docs/`，故说明一次）
@@ -14,6 +15,7 @@
 > - 报告产出于工作区 `qqa/`：**仓库本体**在 `qqa/repo/`；验证产物在 `qqa/_results/`；本轮辅助脚本在 `qqa/_tools/`；样本解包件在 `qqa/_pkgcheck/`。
 >   文中的 `_results/`、`_tools/`、`_pkgcheck/` 均为**工作区验证产物，不随本仓库入库**（符合 `.gitignore` 的「构建产物绝不入库」约定）。
 > - 文中「**甲方参考实现**」指本仓库 `codex/server-2c2g` 分支（基线 `da6f056`），以及由它构建出的服务器包。该分支原为**纯工作树状态、零提交**（故样本 `server-manifest.json` 记 `"dirty": true`），本轮已整理为提交 `aa714d3` 并推送。
+> - 姊妹报告 `docs/QQA服务器适配-WSL-Linux侧验收报告.md` 覆盖**Windows 与 CI 都无法完成**的环节：真实 systemd 托管安装、安装失败自动回滚、组件托管 socket、cgroup 限制（2C2G 模拟）下的端到端压测。其辅助脚本位于工作区 `qqa/_tools/wsl/`，同样不入库。
 
 ---
 
