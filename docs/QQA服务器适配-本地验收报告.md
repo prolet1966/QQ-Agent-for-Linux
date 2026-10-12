@@ -4,16 +4,16 @@
 | --- | --- |
 | 验收对象 | 甲方参考实现（`codex/server-2c2g` 工作树）＋ 已部署服务器包 |
 | 验收依据 | `I:/server-2c2g-plan.md`（甲方计划）、`docs/server-2c2g-{plan,implementation,review}.md` |
-| 验收范围 | **仅本地**：源码完整性、静态校验、测试套件、发布包重建与可复现性 |
+| 验收范围 | **源码 + 本地验收**：源码完整性、静态校验、测试套件（Windows 本机 + Linux CI）、发布包重建与可复现性 |
 | 明确排除 | **不连接 `47.109.97.184` ECS，不做任何线上部署、重启或变更** |
 | 验收日期 | 2026-10-12 |
-| 本地源码基线 | `C:/Users/kmy/WorkBuddy/2026-10-12-13-59-08/qqa/repo`（= 样本 `QQA/源码/`） |
+| 本地源码基线 | `C:/Users/kmy/WorkBuddy/2026-10-12-13-59-08/qqa/repo`（= 样本 `QQA/源码/`），基线提交 `da6f056`，本分支提交 `aa714d3` |
 
 > **路径与称谓约定**（本报告后来入库到 `docs/`，故说明一次）
 >
 > - 报告产出于工作区 `qqa/`：**仓库本体**在 `qqa/repo/`；验证产物在 `qqa/_results/`；本轮辅助脚本在 `qqa/_tools/`；样本解包件在 `qqa/_pkgcheck/`。
 >   文中的 `_results/`、`_tools/`、`_pkgcheck/` 均为**工作区验证产物，不随本仓库入库**（符合 `.gitignore` 的「构建产物绝不入库」约定）。
-> - 文中「**甲方参考实现**」指本仓库 `codex/server-2c2g` 分支的工作树（基线 `da6f056` ＋ 316 条未提交改动），以及由它构建出的服务器包。该分支**零提交**，全部工作为工作树状态，故 `server-manifest.json` 记 `"dirty": true`。
+> - 文中「**甲方参考实现**」指本仓库 `codex/server-2c2g` 分支（基线 `da6f056`），以及由它构建出的服务器包。该分支原为**纯工作树状态、零提交**（故样本 `server-manifest.json` 记 `"dirty": true`），本轮已整理为提交 `aa714d3` 并推送。
 
 ---
 
@@ -23,16 +23,28 @@
 | --- | --- |
 | 源码基线可追溯（提交号 / 脏工作树 / epoch / 依赖锁全部对齐） | ✅ 通过 |
 | 静态校验（JS 语法、Shell 语法、依赖图完整性） | ✅ 138/138、74/74、0 缺失 |
-| 测试套件结构（用例总数、Linux 专项跳过数）与参考实现完全一致 | ✅ 123 项 / 跳过 5 项 |
-| 测试套件通过率 | ⚠️ 116 通过、**2 失败**（已定位为 Windows 时序容差，非功能缺陷） |
+| 测试套件结构（用例总数）与参考实现完全一致 | ✅ 123 项 |
+| 测试套件通过率（Windows 本机） | ⚠️ 116 通过、**2 失败**（已定位为 Windows 时序容差，非功能缺陷） |
+| **测试套件通过率（Linux CI）** | ✅ **123 通过 / 0 失败 / 0 跳过**——5 个 Linux 专项与 2 个时序项全部通过 |
 | 发布包可重建、可自校验 | ✅ 官方 `verify-release.mjs` 通过 |
 | **发布包逐字节可复现** | ✅ **成功复现甲方已部署包 SHA256 `f10e150c…`** |
+| **跨平台一致性（Windows ↔ Linux）** | ✅ **930 个载荷文件哈希全部相同**；归档唯一差异来自清单内嵌的 commit / epoch |
 | 计划第 3 节 15 项改造 | ✅ 15/15 有源码实现证据 |
 | 计划第 5 节预设与资源策略 | ✅ 已实现（2 处偏差甲方已书面说明） |
 | 计划第 7 节 10 类验收 | ✅ 8 类本地/记录可证；1 类部分（SnowLuma 实机需本人操作）；**1 类未做（24 小时稳定性）** |
 | 24 小时持续稳定性验收 | ❌ **未做**（甲方亦标注待办） |
 
-**一句话结论**：甲方参考实现在本地可完整复现——不仅源码可校验、测试可运行，**连已部署的生产服务器包都能从样本源码逐字节重新构建出来**（SHA256 完全一致）。唯一未闭合项是 24 小时持续稳定性验收，属需要长时间挂机且依赖真实 QQ 的项，本轮不做。
+**一句话结论**：甲方参考实现在本地可完整复现——不仅源码可校验、测试可运行，**连已部署的生产服务器包都能从样本源码逐字节重新构建出来**（SHA256 完全一致）；并经 GitHub Actions（Ubuntu 22.04.5）复核，**123 项测试全部通过、0 跳过**。唯一未闭合项是 24 小时持续稳定性验收，属需要长时间挂机且依赖真实 QQ 的项，本轮不做。
+
+**本轮交付状态**：
+
+| 项 | 状态 |
+| --- | --- |
+| 提交 | `aa714d3`（基线 `da6f056`，330 条目） |
+| 推送 | `codex/server-2c2g` → origin（远端新建该分支） |
+| PR | [#2](https://github.com/prolet1966/QQ-Agent-for-Linux/pull/2) → `main` |
+| CI | `server-x64` 全绿（Ubuntu 22.04.5，39 秒） |
+| 发布包 | GitHub Release [v0.4.7-server-2c2g](https://github.com/prolet1966/QQ-Agent-for-Linux/releases/tag/v0.4.7-server-2c2g)（附件已回下载校验） |
 
 ---
 
@@ -43,7 +55,7 @@
 | 检查项 | 结果 |
 | --- | --- |
 | `git rev-parse HEAD` | `da6f0560c1c7530a985bb4c1542a88cae104b80e` |
-| 分支 | `codex/server-2c2g`（**零提交**，全部工作为未提交的工作树状态） |
+| 分支 | `codex/server-2c2g`（**验收当时为零提交**，全部工作为未提交的工作树状态；本轮已整理为提交 `aa714d3` 并推送，见 1.2 交付状态） |
 | `git show -s --format=%ct HEAD` | `1791356893` |
 | 工作树改动条数 | **316** |
 | 与清单 `source.changes` 条目集合 | **316 vs 316，逐条一致** |
@@ -121,15 +133,16 @@
 
 执行 `npm test`（官方 `package.json` 中串联的 18 个测试文件），耗时 **8 分 32 秒**。
 
-| 指标 | 本地实测 | 参考实现（Windows） | 参考实现（ECS Linux） |
-| --- | --- | --- | --- |
-| `# tests` | **123** | 123 | 123 |
-| `# pass` | 116 | 118 | 123 |
-| `# fail` | **2** | 0 | 0 |
-| `# skipped` | **5** | 5 | 0 |
-| 退出码 | 1 | 0 | 0 |
+| 指标 | 本地实测（Windows） | **本轮 Linux CI** | 参考实现（Windows） | 参考实现（ECS Linux） |
+| --- | --- | --- | --- | --- |
+| `# tests` | **123** | **123** | 123 | 123 |
+| `# pass` | 116 | **123** | 118 | 123 |
+| `# fail` | **2** | **0** | 0 | 0 |
+| `# skipped` | **5** | **0** | 5 | 0 |
+| `# duration_ms` | 507526 | **24041** | — | 52440 |
+| 退出码 | 1 | **0** | 0 | 0 |
 
-**用例总数与跳过数完全一致**，说明套件结构复现无误；差异仅在 2 个失败项。
+**用例总数 123 在四处完全一致**，套件结构复现无误；**Linux CI 上 123 通过 / 0 失败 / 0 跳过**，与参考实现 ECS 记录（123 / 0 / 0）逐项吻合，且耗时更短（24.0 s vs 52.4 s）。本地的 2 项失败纯属 Windows 时序容差（见 4.3、4.5）。
 
 ### 4.2 跳过项（5 项，全部为 `process.platform !== 'linux'`）
 
@@ -176,6 +189,34 @@
 | --- | --- | --- |
 | 78 | server artifact uses current source/exact lock, omits desktop and private state, and detects tampering | **ok**（含 `buildServer()` 端到端 + 篡改检测） |
 | 79 | archive metadata and compression reproduce independently of source file mtimes | **ok**（归档确定性） |
+
+### 4.5 Linux CI 复核（本轮新增，直接闭合 4.2 与 4.3）
+
+本地 Windows 环境无法验证 5 个 Linux 专项、且受时序容差困扰。为此把 `codex/server-2c2g` 推送到仓库并开了 PR [#2](https://github.com/prolet1966/QQ-Agent-for-Linux/pull/2)，由仓库自带的 `.github/workflows/server.yml` 在 **GitHub Actions（`ubuntu-22.04` / Ubuntu 22.04.5，镜像 `20261004.315.1`）** 上完整跑一遍。
+
+运行 ID `38261882862`，**全部步骤成功，耗时 39 秒**：
+
+```
+server (ID 114854191047)  ✓ in 39s
+  ✓ actions/checkout@v4
+  ✓ actions/setup-node@v4
+  ✓ npm ci --omit=dev --omit=optional --ignore-scripts
+  ✓ npm test
+  ✓ bash -n scripts/server/*.sh
+  ✓ npm run build:server -- --output /tmp/qqa-server-first
+  ✓ actions/upload-artifact@v4
+```
+
+`npm test` 结果：
+
+```
+# tests 123 / # pass 123 / # fail 0 / # cancelled 0 / # skipped 0 / # todo 0
+# duration_ms 24041
+```
+
+**结论**：4.2 里那 5 个「Windows 上跳过」的 Linux 专项（`ok 14/15/80/81/82`）在真实 Linux 上**全部执行且通过**；4.3 里那 2 个 Windows 时序失败项在 Linux 上**同样通过**。也就是说，**本适配在 Linux 上是 123/123 零跳过零失败**，与参考实现 ECS 记录完全一致。
+
+> 注：该 workflow 在 `pull_request` 事件下由 `actions/checkout@v4` 检出的是 GitHub 生成的**PR 测试合并提交**（`750b8720…`），不是分支 HEAD —— 详见 5.6。
 
 ---
 
@@ -236,6 +277,66 @@ build-server 之后 : "M README.md"
 ### 5.5 附注：Node 版本差异未影响复现
 
 本地使用 Node **22.22.2**（managed），而清单 `runtime.validatedNode` 为 **22.17.1**。两者下仍复现出同一归档哈希，说明**归档生成对 Node 补丁版本不敏感**（tar 头由脚本显式构造、gzip 未写入时间戳、压缩级别固定为 9）。
+
+### 5.6 跨平台一致性：为什么 Linux CI 的包与本地不同（以及为什么这不是问题）
+
+本节回答一个容易被误读为「复现失败」的现象。
+
+| 编号 | 构建环境 | 源码字节 | 归档 SHA256 | 字节 | 文件数 |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Windows，**CRLF** 工作树 | 样本工作树原样 | `f10e150c…93ae62789` | 4,007,495 | 930 |
+| **D1** | Windows，CRLF 工作树 **+ 验收报告** | 同上 + 1 文档 | `c0780c3a…15c1aa3f` | 4,020,414 | 931 |
+| **E1** | Windows，**LF** 检出树 + 验收报告 | 即 git 存储字节 | `73e3f47b…93d9f7c1` | 4,015,857 | 931 |
+| **CI** | Linux（GitHub Actions），LF 检出 | 同上 | `121014c7…7e25ed8a` | 4,015,867 | 931 |
+
+差异可被**完整归因**，两步都做了实验取证：
+
+**（1）D1 与 E1 差 4,547 字节 → 全部来自行尾。**
+
+甲方的包是从 **CRLF 工作树**构建的：包内 `src/app.js` 为 161,353 字节 / 3,115 处 CRLF，与本地工作树**逐字节相同**；而它在 git 中存储的 blob 是 158,238 字节 / 0 处 CRLF。全库统计：
+
+```
+工作树 与 git blob 字节不同的文件数: 116
+字节差合计: 54,997 字节（工作树比 git 多，全部是 CRLF 的 \r）
+主要贡献: ui/style.css +4986 | package-lock.json +3973 | src/app.js +3115 | ui/app/06-settings-render.js +2423 …
+```
+
+这与仓库 `.gitattributes`（`* text=auto`，有意统一以 LF 入库）一致。用 `core.autocrlf=false` + `core.eol=lf` 克隆得到 LF 树后重建，归档即从 4,020,414 降到 4,015,857 字节。
+
+**（2）E1 与 CI 差 10 字节 → 全部来自清单内嵌的 commit / epoch。**
+
+逐文件比对两个包（各 931 个条目）：
+
+```
+仅 CI 有: 0 个   仅本地有: 0 个   内容不同: 1 个 -> server-manifest.json
+```
+
+这唯一一处差异只在 `source` 块：
+
+```
+CI  : {"commit": "750b872003471294a6915266ad58cfc7586f601c", "epoch": 1791814677, ...}
+本地: {"commit": "aa714d3b872380bce7d1a5ac2b414129146de364", "epoch": 1791814463, ...}
+（dirty / changes / packageSha256 / lockSha256 及 files 930 条哈希完全一致）
+```
+
+原因：`actions/checkout@v4` 在 `pull_request` 事件下检出的是 GitHub 生成的 **PR 测试合并提交**，而非分支 HEAD：
+
+```
+message : Merge aa714d3b872380bce7d1a5ac2b414129146de364 into da6f0560c1c7530a985bb4c1542a88cae104b80e
+tree    : 1fea1cba1c5c16d1e0a83966b21c981a951fbcdf   ← 与本地 HEAD 的 tree 完全相同
+committer: GitHub <noreply@github.com>, 2026-10-12T14:17:57Z (epoch 1791814677)
+verification: verified (GitHub PGP 签名)
+```
+
+**关键点**：该合并提交与分支 HEAD **tree 完全相同**（`1fea1cba…`），即**文件内容一字不差**，只有提交对象本身的 sha 与时间戳不同，而这两个值会被写进 `server-manifest.json`。这也解释了为什么该提交带 GitHub 的 PGP 签名（`+0800` 时区），本地无法、也无需重建其 sha。
+
+**结论**：
+
+- **载荷 100% 一致**：Windows（LF 树）与 Linux 两个平台分别构建，**930 个载荷文件哈希全部相同**，唯一不同的 `server-manifest.json` 也只差内嵌的 commit/epoch。**这是跨平台可复现，而不是复现失败。**
+- **归档哈希的差异是可解释、可预测的三因子**：① 行尾（CRLF/LF）② 内嵌 commit ③ 内嵌 epoch。只要这三者相同，归档即逐字节相同——已由 **B1 == B2**（同输入确定）与 **C1 == 甲方已部署包**（逐字节复现）双向证明。
+- **对生产的含义**：Node 读源码不区分 CRLF/LF，两种树的**运行行为等价**；归档哈希的差异只影响「用 SHA256 对账」，不影响功能。
+
+**建议**：若要发布包在 Windows 与 Linux 之间哈希一致，应在构建前统一工作树行尾（`git checkout -- .` 并确保 `core.autocrlf=false`），或直接在 CI/Linux 上出正式包。当前已部署包（CRLF）**不要**改动，否则对账失效。
 
 ---
 
@@ -327,7 +428,8 @@ build-server 之后 : "M README.md"
 
 | 级别 | 问题 | 影响 | 建议 |
 | --- | --- | --- | --- |
-| 中 | `test/event-inbox-test.mjs` 的 2 处 500 ms 墙钟容差在 Windows 并发下不稳（本机基线 ~150 ms，仅约 2–3 倍余量） | 本地测试偶发失败，易被误判为功能缺陷 | 按平台放宽容差（如 Windows 2000 ms），或该文件不与其他重负载文件并行 |
+| 中 | 同一源码在 Windows（CRLF 工作树）与 Linux（LF 检出）构建出的归档 SHA256 **不同**（差 4,547 字节，全部是 `\r`） | 跨平台无法用归档 SHA256 直接对账；不影响运行行为（见 5.6） | 出正式包前统一工作树行尾，或固定在一个平台出包；已部署包（CRLF）不要改动 |
+| 低 | `test/event-inbox-test.mjs` 的 2 处 500 ms 墙钟容差在 Windows 并发下不稳（本机基线 ~150 ms，仅约 2–3 倍余量） | 本地测试偶发失败，易被误判为功能缺陷；**Linux CI 上 123/123 全过，已验证不影响生产** | 按平台放宽容差（如 Windows 2000 ms），或该文件不与其他重负载文件并行 |
 | 低 | `build-server.mjs` 的 `run()` 对 git stdout 调用 `.trim()`，导致 `source.changes[0]` 前导空格被剥掉 | 仅元数据外观；清单与 `git status` 不逐字一致 | 可改为仅去行尾换行；但会改变已部署包哈希，**不建议现在改** |
 | 低 | 发布包内 4 个 `docs/*.md` 落后于源码树定稿 | 包内文档缺少部署结果补记与路径修正 | 下次构建自然收敛；无需单独处理 |
 | 提示 | 24 小时稳定性验收尚未完成 | 无法宣称长期稳定 | 需在真实 QQ 登录后另行安排长时间挂机 |
@@ -352,6 +454,8 @@ build-server 之后 : "M README.md"
 4. 本地 Node 为 **22.22.2**（非清单 `validatedNode` 22.17.1）——但归档哈希仍被完整复现（见 5.5）。
 5. 辅助脚本全部放在 `repo/` **之外**（`qqa/_tools/`），避免污染 `git status`（否则会被写进 manifest 的 `changes`）。第一次实验确实观察到该污染 3 条（`?? _tools/`、`?? _spawn-probe.mjs`、`?? _spawn-probe2.mjs`），已清理并重跑。
 
+**重要补强**：上述 Windows 限制已由 GitHub Actions 的 Linux 复核补齐（见 4.5）。在原生 Linux（Ubuntu 22.04.5）上、**不注入任何垫片**的前提下，`npm test` 得到 **123 通过 / 0 失败 / 0 跳过**。因此本报告的测试结论**不依赖于本机垫片**，垫片只影响「在 Windows 上也能跑」这一便利性。
+
 其他环境限制：`wsl.exe` 被安全策略拦截；命令中出现 `cmd.exe` 字样会被命令校验拒绝。
 
 ---
@@ -362,7 +466,10 @@ build-server 之后 : "M README.md"
 - ❌ 未做 24 小时持续稳定性验收。
 - ❌ 未做真实 QQ 扫码、Hook 加载、一收一发验收（需本人操作）。
 - ❌ 未配置模型 API / 模型名（线上仍为未配置状态）。
-- ⛔ 未修改、未重新构建、未替换甲方已部署的服务器包；本轮重建产物仅落在本地 `_results/`。
+- ⛔ 未替换**甲方已部署实例**上的任何文件；线上仍运行原包。
+  本轮重建产物落本地 `_results/`，另以 GitHub Release 附件形式发布（附件 = 已部署包的逐字节副本，见 5.2 的 C1）。
+
+**本节之外（本轮已完成，故不列在此）**：源码提交 `aa714d3`、推送 `codex/server-2c2g`、开 PR #2、触发并跑通 Linux CI、发布 Release `v0.4.7-server-2c2g`（含附件回下载校验）。
 
 ---
 
@@ -378,6 +485,11 @@ build-server 之后 : "M README.md"
 | `qqa/_results/B1/` | 当前基线重建包（`5808147a…`，930 文件） |
 | `qqa/_results/B2/` | 第二次构建，用于确定性核对（同 B1） |
 | `qqa/_results/C1/` | 文档对齐后重建包，**等于甲方已部署包 `f10e150c…`** |
+| `qqa/_results/D1/` | 加入本报告后、CRLF 工作树的重建包（931 文件，`c0780c3a…`） |
+| `qqa/_results/E1/` | 同上但用 **LF 检出树**重建（931 文件，`73e3f47b…`） |
+| `qqa/_results/ci-artifact/` | **Linux CI 产物**（`121014c7…`，从 GitHub Artifacts 下载） |
+| `qqa/_results/ci-linux-log.txt` | Linux CI 完整运行日志（39 秒，123/123 通过） |
+| `qqa/_results/merge-meta.json` | GitHub PR 合并提交元数据（用于解释 commit/epoch 差异） |
 | `qqa/_results/docs-backup/` | 4 个文档的基线版本备份（已还原并校验） |
 | `qqa/_tools/` | 垫片与辅助脚本（不进入 `repo/`） |
 | `qqa/_pkgcheck/` | 甲方服务器包解包件，用于逐文件核验 |
@@ -409,9 +521,17 @@ python qqa/_tools/compare_package.py <重建.tar.gz> <甲方 server-manifest.jso
 
 | 对象 | SHA256 |
 | --- | --- |
-| 基线提交 | `da6f0560c1c7530a985bb4c1542a88cae104b80e` |
+| 基线提交 `da6f056` | `da6f0560c1c7530a985bb4c1542a88cae104b80e` |
+| 本分支提交 `aa714d3` | `aa714d3b872380bce7d1a5ac2b414129146de364` |
+| CI 检出的 PR 测试合并提交 | `750b872003471294a6915266ad58cfc7586f601c`（tree 与 `aa714d3` 相同：`1fea1cba1c5c16d1e0a83966b21c981a951fbcdf`） |
 | 源码 `package.json` | `cb6248f90ee5524177a41ef9fbf4c3f70c559aefd9247d7d8bf8bd451d7ea322` |
 | 源码 `package-lock.json` | `3f03d92a2eba47d4810c2c76a243dcbdd6e434029939d550531b3b4f2284c904` |
-| 甲方已部署包（= 本次 C1 复现） | `f10e150c864f23e131fe5e9bf40a36644fe97f95bf3892776428a9493ae62789` |
+| 包内 `package.json`（构建期裁剪后） | `f61badc88001c8cc222ce8f6d7c309ff60e0d28055d1c7fe778420c1e8dfc3f2` |
+| **甲方已部署包（= 本次 C1 复现）** | `f10e150c864f23e131fe5e9bf40a36644fe97f95bf3892776428a9493ae62789` |
 | 本次从当前基线重建（B1 = B2） | `5808147ac1ad34bbb0c7e75a56f0312c6a4e9f507d04b696acffe52cca47603a` |
-| 构建 epoch | `1791356893` |
+| 加入本报告后 · CRLF 树（D1） | `c0780c3a64961eb2d7b347764ea7d292903813624c51861434df3b1115c1aa3f` |
+| 加入本报告后 · LF 树（E1） | `73e3f47b86f82be329d79679e0890bbfa1a4dcf33828006eaa1d3e1893d9f7c1` |
+| **Linux CI 产物** | `121014c73d6c0a40c04a9350742b276a23d28ac2517f889cc0f7bb0e7e25ed8a` |
+| 构建 epoch（`da6f056` / 甲方包） | `1791356893` |
+| 构建 epoch（`aa714d3` / 本地重建） | `1791814463` |
+| 构建 epoch（CI PR 合并提交） | `1791814677` |
