@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QQA 控制台登录</title><link rel="stylesheet" href="/login.css"><script src="/login.js" defer></script></head>
+<body><main><h1>QQA 控制台</h1><p id="hint">输入控制台密码。首次密码保存在服务器数据目录的 console-initial-password.txt。</p>
+<form id="login"><label>密码<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="256" required></label><button>登录</button></form>
+<form id="change" hidden><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label><label>再次输入<input id="repeat-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label><button>修改密码并进入</button></form>
+<p id="error" role="alert"></p><button id="logout" hidden>退出登录</button><a href="/" id="back" hidden>返回控制台</a></main></body></html>

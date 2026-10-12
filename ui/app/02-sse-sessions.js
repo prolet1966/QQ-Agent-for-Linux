@@ -1,5 +1,52 @@
 // 〔SSE / 会话视图〕——M9 拆分第 3 段
 'use strict';
+// SSE bursts share one refresh pass. A second burst waits until the first pass settles.
+const SSE_REFRESH_DELAY_MS = 300;
+let sseRefreshTimer = null;
+let sseRefreshFlags = {};
+let sseRefreshScope = null;
+let sseFollowSelection = 0;
+let sseRefreshInflight = null;
+const sseTaskInflight = new Map();
+function currentSessionScope() { return state.activeInst || null; }
+function scheduleSSERefresh(flags = {}) {
+  const scope = currentSessionScope();
+  if (sseRefreshScope !== scope) { sseRefreshFlags = {}; sseRefreshScope = scope; }
+  if (flags.follow && !sseRefreshFlags.follow) sseFollowSelection = sessionSelectionRevision;
+  for (const [key, enabled] of Object.entries(flags)) if (enabled) sseRefreshFlags[key] = true;
+  if (sseRefreshTimer || sseRefreshInflight) return;
+  sseRefreshTimer = setTimeout(flushSSERefresh, SSE_REFRESH_DELAY_MS);
+}
+function sharedSSETask(key, action) {
+  if (sseTaskInflight.has(key)) return sseTaskInflight.get(key);
+  const promise = Promise.resolve().then(action).catch((error) => console.warn('[控制台刷新]', error?.message || error))
+    .finally(() => { if (sseTaskInflight.get(key) === promise) sseTaskInflight.delete(key); });
+  sseTaskInflight.set(key, promise); return promise;
+}
+async function flushSSERefresh() {
+  sseRefreshTimer = null;
+  if (sseRefreshInflight) return;
+  const flags = sseRefreshFlags, scope = sseRefreshScope, followSelection = sseFollowSelection; sseRefreshFlags = {};
+  if (scope !== currentSessionScope()) return;
+  const pass = (async () => {
+    const jobs = [];
+    if (flags.sessions) jobs.push(loadSessions({ quiet: true, refreshDetail: false }).then(() => {
+      if (scope !== currentSessionScope()) return;
+      if (flags.follow && state.autoFollowRunning && followSelection === sessionSelectionRevision) {
+        const active = state.sessions.find((s) => s.status === 'waiting' || s.status === 'running');
+        if (active && active.id !== state.currentSessionId) return selectSession(active.id);
+      }
+    }));
+    if (flags.detail && state.currentSessionId) jobs.push(loadSessionDetail(state.currentSessionId, { quiet: true }));
+    if (flags.status) jobs.push(sharedSSETask('status', refreshStatus));
+    if (flags.chats && state.tab === 'chats') jobs.push(sharedSSETask('chats', () => loadChats({ quiet: true })));
+    if (flags.snowluma && state.tab === 'snowluma') jobs.push(sharedSSETask('snowluma', () => loadSnowlumaPage({ quiet: true })));
+    else if (flags.logs && appReady && (state.tab === 'snowluma' || state.tab === 'settings')) jobs.push(sharedSSETask('snowluma-logs', refreshSnowlumaLogs));
+    await Promise.all(jobs);
+  })();
+  sseRefreshInflight = pass;
+  try { await pass; } finally { if (sseRefreshInflight === pass) sseRefreshInflight = null; if (Object.keys(sseRefreshFlags).length && !sseRefreshTimer) sseRefreshTimer = setTimeout(flushSSERefresh, SSE_REFRESH_DELAY_MS); }
+}
 // ── SSE ──
 function connectSSE() {
   // 预览模式：没有真实事件源，会话由 00-preview.js 的模拟器推进；
@@ -8,15 +55,8 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   es.addEventListener('session-start', () => {
     if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
-    loadSessions();
-    refreshStatus();
-    // 自动跟随新会话（等待中/运行中）
-    if (state.autoFollowRunning) {
-      loadSessions({ quiet: true }).then(() => {
-        const active = state.sessions.find((s) => s.status === 'waiting' || s.status === 'running');
-        if (active && active.id !== state.currentSessionId) selectSession(active.id);
-      });
-    }
+    sessionSummaryRevision++;
+    scheduleSSERefresh({ sessions: true, status: true, follow: true });
   });
   es.addEventListener('session-update', (ev) => {
     if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
@@ -24,6 +64,12 @@ function connectSSE() {
     try { data = JSON.parse(ev.data); } catch { return; }
     const id = data.sessionId;
     if (!id) return;
+    if (data.refresh) {
+      sessionSummaryRevision++;
+      if (id === state.currentSessionId) sessionDetailRevision++;
+      scheduleSSERefresh({ sessions: true, detail: id === state.currentSessionId });
+      return;
+    }
     // SSE 事件本身携带完整会话快照：patch 立即进 state，渲染走合批（见上）
     const patch = {
       id,
@@ -45,12 +91,13 @@ function connectSSE() {
     if (data.error !== undefined) patch.error = data.error;
     if (data.endedAt !== undefined) patch.endedAt = data.endedAt;
     const existing = state.sessions.find((s) => s.id === id);
+    sessionSummaryRevision++;
+    if (id === state.currentSessionId) sessionDetailRevision++;
     if (existing) {
       Object.assign(existing, patch);
     } else {
       state.sessions.unshift({ ...patch, trigger: data.trigger || '', triggerSummary: data.triggerSummary || '', startedAt: data.startedAt ?? Date.now() });
-      // 上限要大于一次可取的数量，否则新会话一进来就把旧的挤没了
-      state.sessions = state.sessions.slice(0, SESSION_KEEP);
+      state.sessionTotal = Math.max(Number(state.sessionTotal) || 0, state.sessions.length);
     }
     // 详情 patch 合并暂存，渲染合批到每帧一次（不再来一条事件全量重建一次）
     pendingSessionDetail.set(id, { ...pendingSessionDetail.get(id), ...patch });
@@ -60,21 +107,20 @@ function connectSSE() {
     if (isPeerView()) return;   // 统一控制台：查看对端时不混入本机会话事件
     let data = {};
     try { data = JSON.parse(ev.data); } catch { /* 数据坏了也照常刷列表 */ }
-    loadSessions();
-    if (state.tab === 'chats') loadChats({ quiet: true });
-    refreshStatus();
+    sessionSummaryRevision++;
+    scheduleSSERefresh({ sessions: true, chats: true, status: true });
     // ⚠️ 会话刚结束必须主动重拉一次详情：轮询只刷 running/waiting 的会话，
     //    最终态（sent / finishReason / error）之后再也不来 —— 不重拉的话，
     //    "已发送到 QQ"徽标和收尾状态只能等用户手动刷新才出现。
     const id = data.sessionId;
     if (id && id === state.currentSessionId) {
       pendingSessionDetail.delete(id);   // 丢弃残留的过期 patch，防止把刚拉的最终态回闪成旧值
-      loadSessionDetail(id, { quiet: true });
+      sessionDetailRevision++;
+      scheduleSSERefresh({ detail: true });
     }
   });
   es.addEventListener('chat-update', () => {
-    if (state.tab === 'chats') loadChats({ quiet: true });
-    refreshStatus();
+    scheduleSSERefresh({ chats: true, status: true });
   });
   es.addEventListener('memory-update', (ev) => {
     let data = {};
@@ -122,19 +168,18 @@ function connectSSE() {
     }
   });
   es.addEventListener('onebot-status', () => {
-    refreshStatus();
-    if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
+    scheduleSSERefresh({ status: true, snowluma: true });
   });
-  es.addEventListener('status', () => refreshStatus());
+  es.addEventListener('status', () => scheduleSSERefresh({ status: true }));
   es.addEventListener('peer-status', (ev) => {
     let d = {};
     try { d = JSON.parse(ev.data || '{}'); } catch { /* 坏数据跳过本条，不断流 */ }
     state.peer = d || null;
     paintPeerStatus(state.peer);
   });
-  es.addEventListener('snowluma-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
-  es.addEventListener('qq-portable-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
-  es.addEventListener('qq-portable-log', () => { if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
+  es.addEventListener('snowluma-status', () => scheduleSSERefresh({ status: true, snowluma: true }));
+  es.addEventListener('qq-portable-status', () => scheduleSSERefresh({ status: true, snowluma: true }));
+  es.addEventListener('qq-portable-log', () => scheduleSSERefresh({ snowluma: true }));
   es.addEventListener('snowluma-log', (ev) => {
     let d = {};
     try { d = JSON.parse(ev.data); } catch { /* 坏数据跳过本条，不断流 */ }
@@ -142,7 +187,7 @@ function connectSSE() {
       setLoadingStatus(d.text);
     }
     if (appReady && (state.tab === 'snowluma' || state.tab === 'settings')) {
-      refreshSnowlumaLogs();
+      scheduleSSERefresh({ logs: true });
     }
   });
   es.addEventListener('feedback', (ev) => {
@@ -175,25 +220,68 @@ function connectSSE() {
 }
 
 // ── 会话视图 ──
-async function loadSessions({ quiet = false } = {}) {
-  try {
-    // 一次全取：后端上限 2^20（约等于不限），前端靠分页渲染（SESSION_PAGE）避免卡顿
-    const data = await api('/api/sessions?limit=1048576');
-    state.sessions = data.sessions || [];
-    renderSessionList();
-    // 自动跟随最新运行中的会话
-    if (state.autoFollowRunning && !state.currentSessionId) {
-      const active = state.sessions.find((s) => s.status === 'waiting' || s.status === 'running');
-      if (active) selectSession(active.id);
-    }
-    // 当前打开的会话在等待/运行中时，也顺手刷新详情
-    if (state.currentSessionId) {
-      const cur = state.sessions.find((s) => s.id === state.currentSessionId);
-      if (cur && (cur.status === 'running' || cur.status === 'waiting')) {
-        loadSessionDetail(state.currentSessionId, { quiet: true });
+let sessionListInflight = null;
+let sessionSummaryRevision = 0;
+let sessionDetailRevision = 0;
+let sessionSelectionRevision = 0;
+const sessionDetailInflight = new Map();
+const SESSION_FETCH_PAGE = 100;
+const SESSION_FETCH_MAX = 500;
+function loadSessions({ quiet = false, refreshDetail = true } = {}) {
+  const scope = currentSessionScope();
+  if (sessionListInflight?.scope === scope) return sessionListInflight.promise;
+  const revision = sessionSummaryRevision;
+  // Keep the entire already-loaded prefix. Each HTTP page respects the server's 500-row limit.
+  const wanted = Math.max(SESSION_FETCH_PAGE, (state.sessions || []).length);
+  const request = { scope, promise: null };
+  request.promise = (async () => {
+    try {
+      const sessions = [], seen = new Set(); let offset = 0, total = Infinity;
+      while (sessions.length < wanted && offset < total) {
+        const limit = Math.min(SESSION_FETCH_MAX, wanted - sessions.length);
+        const data = await api(`/api/sessions?limit=${limit}&offset=${offset}`);
+        if (scope !== currentSessionScope()) return;
+        const page = Array.isArray(data.sessions) ? data.sessions : [];
+        total = Number.isFinite(Number(data.count)) ? Math.max(0, Number(data.count)) : offset + page.length;
+        for (const s of page) if (!seen.has(s.id)) { seen.add(s.id); sessions.push(s); }
+        offset += page.length; if (!page.length) break;
       }
+      if (revision !== sessionSummaryRevision) { scheduleSSERefresh({ sessions: true }); return; }
+      state.sessions = sessions; state.sessionTotal = Number.isFinite(total) ? total : sessions.length;
+      renderSessionList();
+      if (state.autoFollowRunning && !state.currentSessionId) { const active = sessions.find((s) => s.status === 'waiting' || s.status === 'running'); if (active) await selectSession(active.id); }
+      else if (refreshDetail && state.currentSessionId) { const cur = sessions.find((s) => s.id === state.currentSessionId); if (cur && (cur.status === 'running' || cur.status === 'waiting')) await loadSessionDetail(cur.id, { quiet: true }); }
+    } catch (error) { if (!quiet && scope === currentSessionScope()) console.error(error); }
+    finally { if (sessionListInflight === request) sessionListInflight = null; }
+  })();
+  sessionListInflight = request; return request.promise;
+}
+
+async function loadMoreSessions() {
+  const scope = currentSessionScope();
+  if (state.sessionPageLoading) return;
+  state.sessionPageLoading = true;
+  try {
+    if (sessionListInflight?.scope === scope) await sessionListInflight.promise;
+    if (scope !== currentSessionScope()) return;
+    const all = state.sessions || [];
+    if (state.sessionLimit >= all.length && all.length < (state.sessionTotal || 0)) {
+      const revision = sessionSummaryRevision, offset = all.length;
+      const request = { scope, promise: null };
+      request.promise = api(`/api/sessions?limit=${SESSION_FETCH_PAGE}&offset=${offset}`).then((page) => {
+        if (scope !== currentSessionScope()) return;
+        if (revision !== sessionSummaryRevision) { scheduleSSERefresh({ sessions: true }); return; }
+        const seen = new Set(state.sessions.map((s) => s.id));
+        state.sessions.push(...(page.sessions || []).filter((s) => !seen.has(s.id)));
+        state.sessionTotal = page.count ?? state.sessionTotal;
+      }).finally(() => { if (sessionListInflight === request) sessionListInflight = null; });
+      sessionListInflight = request; await request.promise;
     }
-  } catch (e) { if (!quiet) console.error(e); }
+    if (scope !== currentSessionScope()) return;
+    if (state.sessionLimit < state.sessions.length) state.sessionLimit = Math.min(state.sessions.length, state.sessionLimit + SESSION_PAGE);
+    renderSessionList();
+  } catch (error) { if (scope === currentSessionScope()) console.warn('[会话分页]', error?.message || error); }
+  finally { state.sessionPageLoading = false; }
 }
 
 // 会话列表定时刷新：只要停在会话页，就持续更新列表（运行中会话也会轮询详情）
@@ -273,12 +361,7 @@ function attachScrollLoader(elId, onLoadMore) {
 
 /** 会话列表：滚到底部再加载 SESSION_PAGE 条。 */
 function initSessionScrollLoader() {
-  attachScrollLoader('session-list', () => {
-    const all = state.sessions || [];
-    if (state.sessionLimit >= all.length) return;   // 已经全显示了
-    state.sessionLimit = Math.min(all.length, state.sessionLimit + SESSION_PAGE);
-    renderSessionList();
-  });
+  attachScrollLoader('session-list', loadMoreSessions);
 }
 
 /**
@@ -296,18 +379,7 @@ function initSessionScrollLoader() {
  *   表现为"滑到临界线继续向下滚动反应迟钝"。
  */
 function initChatScrollLoader() {
-  attachScrollLoader('chat-detail', () => {
-    const total = (state.chatMessages || []).length;
-    const prev = Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE);
-    if (prev >= total) return;                     // 已经全显示了
-    state.chatMsgLimit = Math.min(total, prev + CHAT_MSG_MORE);
-    // 行数账本对不上（结构刚被轮询重建过等异常）→ 全量兜底；正常走追加
-    if ((state.chatMsgRendered || 0) !== Math.min(prev, total)) {
-      updateChatMessagesBody(true);
-    } else {
-      appendChatMessageRows(prev);
-    }
-  });
+  attachScrollLoader('chat-detail', () => loadMoreChatMessages());
 }
 
 function startListPoller() {
@@ -368,7 +440,8 @@ function renderSessionList() {
   state.sessionLimit = Math.max(SESSION_PAGE, Number(state.sessionLimit) || SESSION_PAGE);
   const all = state.sessions || [];
   const shown = all.slice(0, state.sessionLimit);
-  const rest = all.length - shown.length;
+  const total = Math.max(all.length, Number(state.sessionTotal) || 0);
+  const rest = total - shown.length;
   box.innerHTML = shown.map((s) => {
     const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
     const waitHtml = s.status === 'waiting' && s.waitUntil
@@ -427,12 +500,12 @@ function renderSessionList() {
   if (more) {
     more.textContent = rest > 0
       ? `向下滚动加载更多（还有 ${rest} 条）`
-      : (all.length > SESSION_PAGE ? `已显示全部 ${all.length} 条` : '');
+      : (all.length > SESSION_PAGE ? `已显示全部 ${total} 条` : '');
   }
   // 头部显示总数（已显示 / 总数），便于确认分页是否真的加载完了
   const cnt = $('#session-count');
   if (cnt) {
-    cnt.textContent = all.length ? `${shown.length}/${all.length}` : '';
+    cnt.textContent = total ? `${shown.length}/${total}` : '';
   }
   for (const s of state.sessions) state.seenSessionIds.add(s.id);
   $$('.session-item', box).forEach((el) => {
@@ -526,6 +599,8 @@ function startWaitTicker() {
 }
 
 async function selectSession(id) {
+  sessionSelectionRevision++; sessionDetailRevision++;
+  pendingSessionDetail.clear();
   state.currentSessionId = id;
   state.sessionDetail = null;
   lastDetailFp = null;
@@ -537,14 +612,31 @@ async function selectSession(id) {
 // 上次渲染会话详情的指纹：内容没变就不重渲染（轮询期间避免闪烁与滚动重置）
 let lastDetailFp = null;
 
-async function loadSessionDetail(id, { quiet = false } = {}) {
-  try {
-    const s = await api(`/api/sessions/${id}`);
-    state.sessionDetail = s;
-    if (state.currentSessionId === id && state.tab === 'sessions') renderSessionDetail(s);
-  } catch (e) {
-    if (!quiet) $('#session-detail').innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
-  }
+function loadSessionDetail(id, { quiet = false, offset = null } = {}) {
+  const scope = currentSessionScope(), selection = sessionSelectionRevision, revision = sessionDetailRevision;
+  const pageOffset = offset ?? (state.sessionDetail?.id === id ? state.sessionDetail.detailPage?.offset : 0) ?? 0;
+  const existing = sessionDetailInflight.get(id);
+  if (existing && existing.scope === scope && existing.selection === selection && existing.offset === pageOffset) return existing.promise;
+  const request = { scope, selection, offset: pageOffset, promise: null };
+  request.promise = (async () => {
+    try {
+      const s = await api(`/api/sessions/${encodeURIComponent(id)}${pageOffset ? `?offset=${pageOffset}&limit=100` : ''}`);
+      if (scope !== currentSessionScope() || selection !== sessionSelectionRevision || state.currentSessionId !== id) return;
+      if (sessionDetailInflight.get(id) !== request) return;
+      if (revision !== sessionDetailRevision) { scheduleSSERefresh({ detail: true }); return; }
+      state.sessionDetail = s;
+      if (state.tab === 'sessions') renderSessionDetail(s);
+    } catch (error) {
+      if (!quiet && scope === currentSessionScope() && selection === sessionSelectionRevision && state.currentSessionId === id && sessionDetailInflight.get(id) === request) {
+        $('#session-detail').innerHTML = `<div class="empty-hint">加载失败：${esc(error.message)}${isPeerView() ? '' : `<br><a href="${sessionArchiveUrl(id)}" download>下载完整会话档案</a>`}</div>`;
+      }
+    } finally { if (sessionDetailInflight.get(id) === request) sessionDetailInflight.delete(id); }
+  })();
+  sessionDetailInflight.set(id, request); return request.promise;
+}
+
+function sessionArchiveUrl(id) {
+  return `/api/sessions/${encodeURIComponent(id)}/download`;
 }
 
 function renderSessionDetail(s) {
@@ -552,7 +644,7 @@ function renderSessionDetail(s) {
   if (!detail) return;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
-  const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
+  const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.detailPage?.offset ?? 0}|${s.detailPage?.total ?? 0}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
   if (lastDetailFp === fp) return;
   const firstRender = lastDetailFp === null;
   lastDetailFp = fp;
@@ -584,6 +676,17 @@ function renderSessionDetail(s) {
         <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
       </div>
     </div>`);
+
+  if (s.detailPage) {
+    const page = s.detailPage;
+    html.push(`<div class="sub" style="margin:12px 0">
+      过程记录 ${page.returned ? page.offset + 1 : 0}–${page.offset + page.returned} / ${page.total} 条
+      ${page.offset ? '<button class="btn btn-small" id="session-detail-first">回到开头</button>' : ''}
+      ${page.hasMore ? '<button class="btn btn-small" id="session-detail-more">查看后续记录</button>' : ''}
+      ${isPeerView() ? '' : `<a href="${sessionArchiveUrl(s.id)}" download>下载完整档案</a>`}
+      ${page.truncated ? '<span> · 部分长内容已缩短，完整内容保存在下载档案中。</span>' : ''}
+    </div>`);
+  }
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
@@ -675,6 +778,13 @@ function renderSessionDetail(s) {
   detail.querySelectorAll('details.collapsible').forEach((d, i) => openStates.set(i, d.open));
   detail.innerHTML = html.join('');
   detail.querySelectorAll('details.collapsible').forEach((d, i) => { if (openStates.has(i)) d.open = openStates.get(i); });
+  const moreDetail = $('#session-detail-more');
+  if (moreDetail) moreDetail.addEventListener('click', async () => {
+    moreDetail.disabled = true;
+    await loadSessionDetail(s.id, { offset: s.detailPage.nextOffset });
+  });
+  const firstDetail = $('#session-detail-first');
+  if (firstDetail) firstDetail.addEventListener('click', () => loadSessionDetail(s.id, { offset: 0 }));
   const jsonBtn = $('#json-mode-btn');
   if (jsonBtn) jsonBtn.addEventListener('click', () => {
     state.sessionJsonMode = state.sessionJsonMode === s.id ? null : s.id;

@@ -82,13 +82,14 @@ function describeCause(error, depth = 0) {
 }
 
 export class OneBotClient {
-  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
+  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent, maxPayload = 4 * 1024 * 1024 }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
     this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     this.accessToken = String(accessToken || '');
     // SnowLuma 允许给 WS 与 HTTP 配不同令牌；httpToken 缺省沿用 accessToken
     this.httpToken = String(httpToken || accessToken || '');
     this.onEvent = onEvent || (() => {});
+    this.maxPayload = Math.max(1024, maxPayload);
     this.socket = null;
     this.connected = false;
     this.everConnected = false;
@@ -103,6 +104,7 @@ export class OneBotClient {
   #connectGeneration = 0;  // 连接循环代际号：新循环启动即作废旧循环（防并发僵尸循环）
   #reconnectTimer = null;  // 待执行的重连定时器（close/reconnect 时要清，防泄漏）
   #selfInfoTimer = null;   // get_login_info 延迟补拉定时器
+  #requests = new Map();
 
   onStatus(fn) {
     this.statusListeners.add(fn);
@@ -124,6 +126,7 @@ export class OneBotClient {
 
   /** 连接配置可能变了（比如从 SnowLuma 配置同步到了新令牌），重连一次。 */
   async reconnect() {
+    if (this.#closedByUs) return;
     // 关键：先作废旧 socket，再启新连接。否则旧 socket 的 close 事件稍后到达时
     // 会误以为需要再次重连，造成两个 WebSocket 同时连着 SnowLuma，所有事件收到两份。
     const old = this.socket;
@@ -175,7 +178,8 @@ export class OneBotClient {
     let socket;
     try {
       socket = new WebSocket(url, {
-        headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {}
+        headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {},
+        maxPayload: this.maxPayload, perMessageDeflate: false, handshakeTimeout: 10000
       });
     } catch (error) {
       this.lastConnectError = String(error?.message ?? error);
@@ -183,7 +187,7 @@ export class OneBotClient {
       // 指数退避：连续构造失败时间隔翻倍，封顶 RECONNECT_MAX_MS ——
       // 曾经固定 RECONNECT_MIN_MS（3 秒一次重试风暴，RECONNECT_MAX_MS 形同虚设）
       this.#failedAttempts++;
-      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** (this.#failedAttempts - 1));
+      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** Math.min(20, this.#failedAttempts - 1)) * (0.8 + Math.random() * 0.4);
       this.#scheduleConnect(generation, delay);
       return;
     }
@@ -227,7 +231,7 @@ export class OneBotClient {
         // 指数退避：长断线时 3 秒一次的重试风暴既刷屏又占资源；
         // 连接成功过一次就重置计数。
         this.#failedAttempts++;
-        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** (this.#failedAttempts - 1));
+        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** Math.min(20, this.#failedAttempts - 1)) * (0.8 + Math.random() * 0.4);
         this.#scheduleConnect(generation, delay);
       }
     });
@@ -243,7 +247,7 @@ export class OneBotClient {
 
   /** 连接活着但 selfInfo 为空时，定期补拉 get_login_info（SnowLuma 慢启动场景）。 */
   #refreshSelfInfoLater() {
-    if (this.#selfInfoTimer) return;
+    if (this.#closedByUs || this.#selfInfoTimer) return;
     const timer = setTimeout(async () => {
       this.#selfInfoTimer = null;
       if (!this.connected || this.selfInfo) return;
@@ -257,16 +261,19 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    for (const controller of this.#requests.keys()) controller.abort(new Error('OneBot 客户端已关闭'));
     if (this.#reconnectTimer) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
     if (this.#selfInfoTimer) { clearTimeout(this.#selfInfoTimer); this.#selfInfoTimer = null; }
     const old = this.socket;
     this.socket = null;
     try { old?.close(); } catch { /* ignore */ }
     this.#setStatus(false);
+    return Promise.allSettled([...this.#requests.values()]).then(() => {});
   }
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action, params = {}, timeoutMs = null) {
+    if (this.#closedByUs) throw new Error('OneBot 客户端已关闭，未发送请求');
     // ── 超时按 action 分档（这里修过一个真实故障）──────────────────────────
     // 原来一律 15 秒。查询类够用，但**发送类不够**：图片/视频以 base64 或大 body
     // 发出去时，协议端要走完「接收 body → 解码 → 上传腾讯服务器 → 返回」，
@@ -274,37 +281,56 @@ export class OneBotClient {
     // 而超时抛的是 `fetch failed`（真因在 cause 里），用户完全看不懂。
     // 发送是不幂等但"重试代价低"的操作，宁可多等，也不要误判失败。
     const limit = timeoutMs ?? (SLOW_ACTION.test(action) ? SEND_TIMEOUT_MS : CALL_TIMEOUT_MS);
-    let res;
+    const controller = new AbortController();
+    let complete;
+    this.#requests.set(controller, new Promise(resolve => { complete = resolve; }));
+    const timer = setTimeout(() => controller.abort(new Error(`OneBot ${action} 请求超时`)), limit);
     try {
-      res = await fetch(`${this.httpUrl}/${action}`, {
+      const res = await fetch(`${this.httpUrl}/${action}`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
         },
         body: JSON.stringify(params),
-        signal: AbortSignal.timeout(limit)
+        signal: controller.signal
       });
+      if (!res.ok) {
+        await res.body?.cancel();
+        const hint = res.status === 426
+          ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 snowluma.httpUrl 是否为 OneBot HTTP API 地址）'
+          : '';
+        throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
+      }
+      const declared = Number(res.headers.get('content-length'));
+      const oversized = () => new Error(`OneBot ${action} 响应超过 ${this.maxPayload} 字节上限`);
+      if (declared > this.maxPayload) { controller.abort(oversized()); throw controller.signal.reason; }
+      let bytes = 0; const chunks = [];
+      for await (const chunk of res.body || []) {
+        bytes += chunk.length;
+        if (bytes > this.maxPayload) { controller.abort(oversized()); throw controller.signal.reason; }
+        chunks.push(chunk);
+      }
+      controller.signal.throwIfAborted();
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')); } catch { body = {}; }
+      if (body.status !== 'ok' && body.retcode !== 0) {
+        throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
+      }
+      return body.data;
     } catch (error) {
+      if (this.#closedByUs) throw new Error(`OneBot ${action} 已中止：客户端已关闭`);
+      if (controller.signal.aborted && /字节上限/.test(controller.signal.reason?.message || '')) throw controller.signal.reason;
       // fetch 只在网络层失败时抛，且 message 恒为 "fetch failed" —— 丢给上层
       // 只会得到一句没法排查的话。这里把 cause 链挖出来再抛。
       const cause = describeCause(error);
-      const aborted = /timeout|abort/i.test(cause) || error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      const aborted = controller.signal.aborted || /timeout|abort/i.test(cause) || error?.name === 'TimeoutError' || error?.name === 'AbortError';
       throw new Error(aborted
         ? `OneBot ${action} 超时（${Math.round(limit / 1000)} 秒未完成）：${cause}`
         : `OneBot ${action} 请求失败：${cause}`);
+    } finally {
+      clearTimeout(timer); this.#requests.delete(controller); complete();
     }
-    if (!res.ok) {
-      const hint = res.status === 426
-        ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 snowluma.httpUrl 是否为 OneBot HTTP API 地址）'
-        : '';
-      throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
-    }
-    const body = await res.json().catch(() => ({}));
-    if (body.status !== 'ok' && body.retcode !== 0) {
-      throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
-    }
-    return body.data;
   }
 
   get selfId() {

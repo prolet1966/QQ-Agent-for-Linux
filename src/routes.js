@@ -38,6 +38,12 @@ import { getGlobalBlocklist, updateGlobalBlocklist, FIXED_PRICE_FEED_URL } from 
 import { listAccounts, removeAccount, loginAccount, publishModule, verifyInstallCodes, installByCode } from './market.js';
 import { importModules } from './module-import.js';
 import { SKILLS_DIR, PLUGINS_DIR } from './plugin-loader.js';
+import { isServerMode, protocolEndpoint } from './runtime.js';
+import { snowlumaProxySupported } from './snowluma-proxy.js';
+import { redactUrl } from './url-redaction.js';
+import { mediaMaxBytes, mediaWork } from './media-resources.js';
+import { sessionFile } from './sessions.js';
+import { pipeline } from 'node:stream/promises';
 
 /**
  * 构建路由表。
@@ -108,13 +114,21 @@ export function createRoutes(deps) {
         // WS 3001 要等账号登录后才监听，用它判"运行中"会把"起了但未登录"
         // 误报成"未运行"（进而触发二次拉起 → 双实例管道冲突）。
         const webuiPort = deps.snowlumaWebuiPort();
-        const slRunning = await deps.isPortOpen('127.0.0.1', webuiPort);
-        const obPortOpen = await deps.isPortOpen('127.0.0.1', snowlumaWsPort());
+        const external = cfgNow.snowluma?.mode === 'external';
+        const slRunning = !external && await deps.isPortOpen('127.0.0.1', webuiPort);
+        const endpoint = protocolEndpoint(onebot.wsUrl);
+        const obPortOpen = endpoint ? await deps.isPortOpen(endpoint.host, endpoint.port) : false;
+        const protocolSetup = external ? null : await deps.protocolDiagnostics?.();
+        const protocolState = external ? { running: false, managed: false, embedded: false, pid: null } : await snowlumaStatus();
+        const desktopEnabled = isServerMode() && cfgNow.server?.desktopProxy === true;
+        const desktopState = desktopEnabled ? await deps.protocolService('desktop') : null;
+        const proxySupported = !external && snowlumaProxySupported(snowlumaDir());
         // 诊断：把"连不上"拆成三种用户能看懂的原因（给 UI 就绪度体检用）。
         let onebotDiagnosis = '';
         if (!onebot.connected) {
-          if (!slRunning) onebotDiagnosis = 'SnowLuma 未运行：请到 SnowLuma 页签启动';
-          else if (!obPortOpen) onebotDiagnosis = 'SnowLuma 已运行但无账号登录：请在 QQ 里完成登录（登录后数秒内会自动连上）';
+          if (external) onebotDiagnosis = obPortOpen ? '外部协议端可达，请检查 OneBot 令牌与协议配置' : '外部 OneBot 地址不可达，请检查地址、监听和网络';
+          else if (!slRunning) onebotDiagnosis = 'SnowLuma WebUI 不可达，请检查独立协议服务和启动日志';
+          else if (!obPortOpen) onebotDiagnosis = 'OneBot 尚未监听：请检查首次配置、QQ 登录、Hook 权限及版本兼容';
           else if (String(onebot.lastConnectError || '').includes('401')) onebotDiagnosis = '访问令牌不匹配：正在自动轮换重试，若持续出现请在设置里核对 OneBot 令牌';
           else onebotDiagnosis = onebot.lastConnectError ? `连接失败：${String(onebot.lastConnectError).slice(0, 120)}` : '连接中…';
         }
@@ -127,9 +141,13 @@ export function createRoutes(deps) {
             self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
           },
           snowluma: {
+            mode: external ? 'external' : 'local',
+            diagnostics: protocolSetup,
             dir: snowlumaDir(),
-            running: slRunning,
-            webuiUrl: snowlumaWebuiUrl(),
+            webuiReachable: slRunning,
+            webuiUrl: external ? '' : isServerMode() ? (proxySupported ? '/snowluma/' : '') : snowlumaWebuiUrl(),
+            proxySupported,
+            tunnelPort: isServerMode() && !external && !proxySupported ? webuiPort : null,
             // 绑定账号：多实例切换器要靠它显示"对端在替哪个号干活"。
             // peer.js 的 sanitizePeerStatus 会白名单透传这个字段（只是账号号，不含令牌）。
             account: (typeof boundAccountUin === 'function' ? boundAccountUin() : '') || '',
@@ -137,11 +155,12 @@ export function createRoutes(deps) {
             // account 只是**配置值**：账号不存在时它照样有值，但连接并没有换 ——
             // 只有看 binding 才知道真相，否则"绑了没生效"完全不可见。
             binding: typeof snowlumaBindingStatus === 'function'
-              ? snowlumaBindingStatus()
+              ? (() => { const b = snowlumaBindingStatus(); return { ...b, wsUrl: redactUrl(b.wsUrl || ''), httpUrl: redactUrl(b.httpUrl || '') }; })()
               : { account: '', bound: false, applied: false, error: '', wsUrl: '', httpUrl: '' },
-            ...snowlumaStatus()
+            ...protocolState
           },
-          qqPortable: await qqPortableStatus(),
+          desktop: { enabled: desktopEnabled, running: desktopState?.running === true, state: desktopState?.state || '' },
+          qqPortable: external ? { ready: false, running: false, external: true } : await qqPortableStatus(),
           orchestrator: orchestrator.statusSummary(),
           usage,
           cost,
@@ -158,6 +177,7 @@ export function createRoutes(deps) {
     {
       method: 'POST', pattern: '/api/open-data-dir',
       handler: async ({ res, json }) => {
+        if (isServerMode()) return json(res, 200, { ok: true, dir: DATA_DIR, remote: true });
         try {
           // Linux 移植改造点（B-4）：原实现写死 spawn('explorer.exe', …)，
           // Linux 上没有 explorer.exe，此接口必然 500。
@@ -217,6 +237,7 @@ export function createRoutes(deps) {
     {
       method: 'POST', pattern: '/api/reset-data',
       handler: async ({ res, json }) => {
+        if (isServerMode()) return json(res, 409, { ok: false, error: '服务器模式不支持在线重置。请先停止 QQA 核心服务，备份完整数据目录，再进行离线维护。', dataDir: DATA_DIR });
         try {
           // 安全闸：只允许重置"看起来确实是数据目录"的路径。
           // QQ_AGENT_DATA_DIR 被误设成 C:\ 或用户目录时，无闸直接 rmSync 就是删盘。
@@ -312,6 +333,43 @@ export function createRoutes(deps) {
 
     // ── SnowLuma 进程管理 ────────────────────────────────────────────
     {
+      method: 'POST', pattern: '/api/snowluma/initial-password',
+      handler: async ({ res, json }) => {
+        res.setHeader('cache-control', 'no-store');
+        if (!isServerMode() || getConfig().snowluma?.mode === 'external') return json(res, 409, { ok: false, error: '本机首次设置尚未启用' });
+        try {
+          const dir = snowlumaDir();
+          const setup = await deps.protocolDiagnostics();
+          const passwordFile = path.join(dir, 'config', 'qqa-initial-password.txt');
+          if (setup.mustChangePassword !== true) {
+            try { fs.rmSync(passwordFile, { force: true }); } catch {}
+            return json(res, 409, { ok: false, error: '初始密码已失效，请使用你设置的 SnowLuma 密码' });
+          }
+          const stat = fs.lstatSync(passwordFile);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256) throw new Error('没有可用的初始密码文件');
+          const password = fs.readFileSync(passwordFile, 'utf8').trim();
+          if (!password) throw new Error('没有可用的初始密码');
+          return json(res, 200, { ok: true, user: 'admin', password });
+        } catch { return json(res, 409, { ok: false, error: '暂未捕获初始密码，请检查 SnowLuma 是否由独立服务启动' }); }
+      }
+    },
+    {
+      method: 'POST', pattern: '/api/qq-desktop/open',
+      handler: async ({ res, json }) => {
+        if (!isServerMode() || getConfig().server?.desktopProxy !== true) return json(res, 409, { ok: false, error: '请先安装并启用服务器临时 QQ 登录窗口' });
+        const result = await deps.protocolService('desktop', 'start');
+        return json(res, result.ok ? 200 : 409, { ...result, url: result.ok ? '/qq-desktop' : '' });
+      }
+    },
+    {
+      method: 'POST', pattern: '/api/qq-desktop/close',
+      handler: async ({ res, json }) => {
+        if (!isServerMode()) return json(res, 409, { ok: false, error: '临时登录窗口仅支持服务器模式' });
+        const result = await deps.protocolService('desktop', 'stop');
+        return json(res, result.ok ? 200 : 409, result);
+      }
+    },
+    {
       method: 'POST', pattern: '/api/snowluma/launch',
       handler: async ({ res, json }) => {
         try {
@@ -329,9 +387,11 @@ export function createRoutes(deps) {
     {
       method: 'POST', pattern: '/api/snowluma/stop',
       handler: async ({ res, json }) => {
+        if (getConfig().snowluma?.mode === 'external') return json(res, 409, { ok: false, error: '当前使用外部协议端，请在协议端自己的管理入口停止服务' });
         try {
-          const stopped = stopSnowluma();
-          return json(res, 200, { ok: true, stopped, embedded: snowlumaStatus().embedded, pid: snowlumaStatus().pid });
+          const stopped = await stopSnowluma();
+          const status = await snowlumaStatus();
+          return json(res, 200, { ok: true, stopped, embedded: status.embedded, pid: status.pid });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
@@ -342,6 +402,7 @@ export function createRoutes(deps) {
       handler: async ({ res, json }) => {
         const dir = snowlumaDir();
         if (!dir) return json(res, 400, { ok: false, error: '找不到 SnowLuma 目录' });
+        if (isServerMode()) return json(res, 200, { ok: true, dir, remote: true });
         // Linux 移植改造点（B-4）：explorer.exe → xdg-open
         const ok = platform.openExternal(dir, { spawnFn: spawn });
         if (!ok) return json(res, 500, { ok: false, dir, error: '无法打开该目录（Linux 需 xdg-utils）' });
@@ -353,6 +414,10 @@ export function createRoutes(deps) {
       handler: async ({ res, json }) => {
         const webuiUrl = snowlumaWebuiUrl();
         if (!webuiUrl) return json(res, 400, { ok: false, error: '没有找到 SnowLuma WebUI 地址（等日志出现 listening 后再试）' });
+        if (isServerMode()) {
+          if (snowlumaProxySupported(snowlumaDir())) return json(res, 200, { ok: true, webuiUrl: '/snowluma/', remote: true });
+          return json(res, 409, { ok: false, error: '此 SnowLuma 版本未验证页面代理，请使用 SSH 本地转发，或升级至 1.14.22', tunnelPort: deps.snowlumaWebuiPort() });
+        }
         // Linux 移植改造点（B-4）：原来是 spawn('cmd.exe', ['/c','start','',url])，
         // Linux 无 cmd.exe。xdg-open 对 URL 同样适用。
         const ok = platform.openExternal(webuiUrl, { spawnFn: spawn });
@@ -376,6 +441,7 @@ export function createRoutes(deps) {
     {
       method: 'POST', pattern: '/api/qq-portable/stop',
       handler: async ({ res, json }) => {
+        if (getConfig().snowluma?.mode === 'external') return json(res, 409, { ok: false, error: '当前使用外部协议端，QQA 不管理其 QQ 进程' });
         try {
           const result = await stopPortableQQ();
           return json(res, result.ok ? 200 : 400, result);
@@ -1185,8 +1251,6 @@ export function createRoutes(deps) {
         //    activate 里读配置必须已经生效，否则 Skill 会以为自己是关闭的）
         if (body.enabled !== undefined) {
           setSkillEnabled(id, !!body.enabled);
-          if (body.enabled) skillManager.activate(id, context);
-          else skillManager.deactivate(id, context);
         }
 
         // 2) 设置（只允许改 manifest 声明过的键，防止前端塞垃圾字段进配置）
@@ -1208,6 +1272,7 @@ export function createRoutes(deps) {
           if (Object.keys(patch).length) setSkillConfig(id, patch);
         }
 
+        if (body.enabled !== undefined || body.settings) await reloadSkills({ reason: 'toggle' });
         emit('status', { configUpdated: true });
         return json(res, 200, {
           ok: true,
@@ -1550,16 +1615,38 @@ export function createRoutes(deps) {
     {
       method: 'GET', pattern: '/api/sessions',
       handler: async ({ res, json, url }) => {
-        const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        return json(res, 200, { sessions: sessions.listSummaries(limit) });
+        const limit = Math.min(500, Math.max(1, Math.floor(Number(url.searchParams.get('limit')) || 100)));
+        const offset = Math.max(0, Math.floor(Number(url.searchParams.get('offset')) || 0));
+        return json(res, 200, { sessions: sessions.listSummaries(limit, offset), count: sessions.summaryCount(), offset, limit, indexing: !!sessions.indexing, progress: sessions.indexProgress || null });
       }
     },
     {
       method: 'GET', pattern: /^\/api\/sessions\/([\w-]+)$/,
-      handler: async ({ res, json, match }) => {
-        const s = sessions.get(match[1]);
+      handler: async ({ res, json, match, url }) => {
+        const s = await sessions.getDetail(match[1], { offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit') });
         if (!s) return json(res, 404, { error: '会话不存在' });
         return json(res, 200, s);
+      }
+    },
+    {
+      method: 'GET', pattern: /^\/api\/sessions\/([\w-]+)\/download$/,
+      handler: async ({ req, res, json, match }) => {
+        const file = sessionFile(match[1]);
+        let handle;
+        try { handle = await fs.promises.open(file, 'r'); } catch (error) {
+          if (error.code === 'ENOENT') return json(res, 404, { error: '会话不存在' });
+          throw error;
+        }
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) return json(res, 404, { error: '会话不存在' });
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': stat.size,
+            'content-disposition': `attachment; filename="${match[1]}.json"`, 'cache-control': 'no-store' });
+          // Open once: an active run may atomically replace its archive while
+          // downloading; bytes and Content-Length must refer to the same file.
+          await pipeline(handle.createReadStream(), res);
+        } catch (error) { if (!req.destroyed && !res.destroyed) throw error; }
+        finally { await handle.close(); }
       }
     },
     {
@@ -1726,51 +1813,100 @@ export function createRoutes(deps) {
       method: 'GET', pattern: /^\/api\/chats\/(group|private)_(\d+)\/messages$/,
       handler: async ({ res, json, url, match }) => {
         const chatKey = `${match[1]}:${match[2]}`;
-        const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        const messages = store.recent(chatKey, { limit }).map((m) => ({
+        const requested = Number(url.searchParams.get('limit') ?? 500);
+        const offset = Number(url.searchParams.get('offset') ?? 0);
+        if (!Number.isSafeInteger(requested) || requested < 1 || !Number.isSafeInteger(offset) || offset < 0) {
+          return json(res, 400, { error: 'limit 必须为正整数，offset 必须为非负整数' });
+        }
+        const limit = Math.min(500, requested);
+        const messages = store.recent(chatKey, { limit, offset }).map((m) => ({
           id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
           text: m.text, self: m.self, read: m.read, reply: m.reply, media: m.media || []
         }));
-        return json(res, 200, { chatKey, messages });
+        const total = store.getChatMeta(chatKey).total;
+        const nextOffset = offset + messages.length;
+        return json(res, 200, { chatKey, messages, total, limit, offset, nextOffset, hasMore: messages.length > 0 && nextOffset < total });
       }
     },
     {
       method: 'POST', pattern: '/api/media-data',
       handler: async ({ req, res, json }) => {
+        // Keep the shared media slot until the response has left the server.
+        // A slow browser must not retain many encoded batches in socket buffers.
+        const reply = (code, body) => {
+          if (res.destroyed) return;
+          if (typeof res.once !== 'function') return json(res, code, body);
+          return new Promise((resolve, reject) => {
+            const done = () => { res.off('finish', done); res.off('close', done); resolve(); };
+            res.once('finish', done); res.once('close', done);
+            try { json(res, code, body); if (res.writableFinished) done(); }
+            catch (error) { res.off('finish', done); res.off('close', done); reject(error); }
+          });
+        };
         try {
           const body = await readBody(req);
-          const items = Array.isArray(body?.items) ? body.items.slice(0, 20) : [];
-          const mimeOf = (p) => /\.png$/i.test(p) ? 'image/png' : /\.gif$/i.test(p) ? 'image/gif' : /\.webp$/i.test(p) ? 'image/webp' : 'image/jpeg';
-          const fileToDataUrl = (fp) => {
-            const st = fs.statSync(fp);
-            if (st.size > 15 * 1024 * 1024) return null;
-            return `data:${mimeOf(fp)};base64,${fs.readFileSync(fp).toString('base64')}`;
-          };
-          // 下载一律走 safe-fetch：这里的 url 来自请求体（前端/任何本机进程都能构造），
-          // 直接 fetch 等于给了一个"让本机去抓内网"的 SSRF 入口。
-          const safeToDataUrl = async (rawUrl) => {
-            const { buffer, contentType } = await safeFetchBinary(String(rawUrl), 15 * 1024 * 1024, { browseLocked: browseLockState().enabled });
-            if (!buffer?.length || buffer.length > 15 * 1024 * 1024) return null;
-            const type = String(contentType || 'image/jpeg').split(';')[0].trim();
-            if (!/^image\//i.test(type)) return null;
-            return `data:${type};base64,${buffer.toString('base64')}`;
-          };
-          const results = [];
-          for (const it of items) {
-            let dataUrl = null;
-            try {
-              const ret = await onebot.call('get_image', { file: String(it?.file || '') });
-              if (ret?.file && fs.existsSync(String(ret.file))) dataUrl = fileToDataUrl(String(ret.file));
-              if (!dataUrl && ret?.url) dataUrl = await safeToDataUrl(ret.url);
-            } catch { /* 缓存没有 / 地址不可信就走下一条 */ }
-            if (!dataUrl && it?.url) {
-              try { dataUrl = await safeToDataUrl(it.url); } catch { /* 过期或不可信就放弃 */ }
+          const items = Array.isArray(body?.items) ? body.items : [];
+          if (items.length > 20) return reply(413, { ok: false, error: '每次最多读取 20 张图片，请分批选择', results: [] });
+          return await mediaWork.run(async () => {
+            if (res.destroyed) return;
+            const budget = mediaMaxBytes(15 * 1024 * 1024);
+            let remaining = budget;
+            const tooLarge = () => Object.assign(new Error(`本次图片总大小超过 ${Math.round(budget / 1024 / 1024)} MiB，请减少图片或分批选择`), { status: 413, expose: true });
+            const encode = (buffer, type) => {
+              if (buffer.length > remaining) throw tooLarge();
+              remaining -= buffer.length;
+              return `data:${type};base64,${buffer.toString('base64')}`;
+            };
+            const mimeOf = p => /\.png$/i.test(p) ? 'image/png' : /\.gif$/i.test(p) ? 'image/gif' : /\.webp$/i.test(p) ? 'image/webp' : 'image/jpeg';
+            const fileToDataUrl = fp => {
+              const fd = fs.openSync(fp, 'r');
+              try {
+                const st = fs.fstatSync(fd);
+                if (!st.isFile()) return null;
+                if (st.size > remaining) throw tooLarge();
+                // Read only the statted size, even if a cache file grows meanwhile.
+                const buffer = Buffer.allocUnsafe(st.size);
+                let read = 0;
+                while (read < buffer.length) {
+                  const count = fs.readSync(fd, buffer, read, buffer.length - read, read);
+                  if (!count) break;
+                  read += count;
+                }
+                return read ? encode(buffer.subarray(0, read), mimeOf(fp)) : null;
+              } finally { fs.closeSync(fd); }
+            };
+            // safe-fetch keeps DNS, redirect and private-address guards intact.
+            const safeToDataUrl = async rawUrl => {
+              if (remaining <= 0) throw tooLarge();
+              const { buffer, contentType } = await safeFetchBinary(String(rawUrl), remaining, { browseLocked: browseLockState().enabled });
+              const type = String(contentType || 'image/jpeg').split(';')[0].trim();
+              if (!buffer?.length || !/^image\//i.test(type)) return null;
+              return encode(buffer, type);
+            };
+            const checkLimit = error => {
+              if (error?.status === 413 || /文件达到大小上限/.test(error?.message || '')) throw tooLarge();
+            };
+            const results = [];
+            for (const it of items) {
+              let dataUrl = null;
+              try {
+                const localProtocol = getConfig().snowluma?.mode !== 'external';
+                const ret = await onebot.call('get_image', { file: String(it?.file || '') });
+                // External OneBot paths belong to another host. A matching
+                // filename on this QQA host must never be treated as its image.
+                if (localProtocol && getConfig().snowluma?.mode !== 'external' && ret?.file && fs.existsSync(String(ret.file))) dataUrl = fileToDataUrl(String(ret.file));
+                if (!dataUrl && ret?.url) dataUrl = await safeToDataUrl(ret.url);
+              } catch (error) { checkLimit(error); }
+              if (!dataUrl && it?.url) {
+                try { dataUrl = await safeToDataUrl(it.url); } catch (error) { checkLimit(error); }
+              }
+              results.push(dataUrl ? { dataUrl } : null);
             }
-            results.push(dataUrl ? { dataUrl } : null);
-          }
-          return json(res, 200, { ok: true, results });
+            return reply(200, { ok: true, results });
+          });
         } catch (error) {
-          return json(res, 200, { ok: false, error: String(error?.message ?? error), results: [] });
+          const code = error?.expose ? error.status : /队列已满|排队超时/.test(error?.message || '') ? 429 : 500;
+          return reply(code, { ok: false, error: String(error?.message ?? error), results: [] });
         }
       }
     },

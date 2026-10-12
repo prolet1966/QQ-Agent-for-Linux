@@ -21,6 +21,7 @@ import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
 import { noteRealPrompt, warmBeforeRealCall, captureRealBody } from './cache-warm.js';
 import { logger } from './logger.js';
+import { isServerMode } from './runtime.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
@@ -66,6 +67,15 @@ export class Orchestrator {
     this.aborted = false;
     this.reminderTimer = null;         // 提醒调度定时器
     this.reminderFiring = new Set();   // 防止同一提醒并发触发
+    this.pendingRuns = new Map();     // One waiting job per chat; unread payload remains in store.
+    this.reservedChats = new Set();   // Reserve before asynchronous readiness checks.
+    this.backgroundRuns = 0;
+    this.backgroundControllers = new Map();
+    this.backlogDeferred = false;
+    this.backlogTimer = null;
+    this.backlogCursor = 0;
+    this.inflight = new Set();
+    this.reminderGeneration = 0;
   }
 
   /**
@@ -87,8 +97,17 @@ export class Orchestrator {
    * 如果模型未配置，wake 会自然跳过（消息保留未读，不丢失）。
    */
   drainBacklogAfterResume() {
+    if (this.aborted || this.paused) return;
+    if (isServerMode() && !this.onebot.connected) { this.backlogDeferred = true; return; }
+    this.#drainPending();
     for (const chatKey of this.store.listChats()) {
-      if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey, 0);
+      try {
+        if (this.#serverCanWake(chatKey) && this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey, 0);
+      } catch (error) {
+        // A damaged/oversized legacy archive must not prevent other chats or
+        // the console from recovering. The archive and its unread state stay.
+        logger.error('backlog', `无法恢复 ${chatKey} 的未读记录：${error?.message ?? error}`);
+      }
     }
   }
 
@@ -117,11 +136,19 @@ export class Orchestrator {
     // 先查 current（运行中/刚复活的），没有再查磁盘留档 —— finish() 会把会话
     // 从 current 移除，"已结束的失败会话"只在磁盘上。只查 current 的话，
     // 每次手动重试都会报"会话不存在"（2026-09-19 修）。
-    const s = this.sessions.current.get(id) || this.sessions.get(id);
+    let s;
+    try { s = this.sessions.current.get(id) || this.sessions.get(id); }
+    catch (error) {
+      if (error?.status === 413 && error?.expose) return { ok: false, reason: error.message };
+      throw error;
+    }
     if (!s) return { ok: false, reason: '会话不存在' };
     if (s.status !== 'error') return { ok: false, reason: '只有失败的会话才能重试' };
     if (Array.isArray(s.sent) && s.sent.length > 0) return { ok: false, reason: '该会话已发出过消息，重试会导致重复发言' };
+    if (!this.#serverCanWake(s.chatKey)) return { ok: false, reason: '协议端未就绪或此会话已不在白名单中' };
     if (this.runningChats.has(s.chatKey)) return { ok: false, reason: '该会话正在运行中' };
+    if (this.pendingRuns.has(s.chatKey) || this.pendingWake.has(s.chatKey)) return { ok: false, reason: '该会话已经在等待队列中' };
+    if (this.pendingRuns.size + this.pendingWake.size >= Math.max(1, Number(getConfig().maxPendingChats) || 32)) return { ok: false, reason: '等待队列已满，请稍后重试' };
     // 把触发批重新标记为未读（消息本体一直在存档里，只是当初被 drain 置了已读）。
     // triggerText 里的文本可能因改名/截断对不上，按会话起止时间窗恢复更稳。
     const restored = this.store.markUnreadInWindow(s.chatKey, s.startedAt, s.endedAt || s.startedAt);
@@ -210,6 +237,14 @@ export class Orchestrator {
   }
 
   scheduleWake(chatKey, delay = null, { reuseSessionId = null } = {}) {
+    if (this.aborted || this.paused) return;
+    if (!this.#serverCanWake(chatKey)) return;
+    if (this.pendingRuns.has(chatKey)) return; // New messages join the already persisted unread batch.
+    const cap = Math.max(1, Number(getConfig().maxPendingChats) || 32);
+    if (!this.pendingWake.has(chatKey) && this.pendingWake.size + this.pendingRuns.size >= cap) {
+      this.#deferBacklog(chatKey);
+      return;
+    }
     const ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
     if (this.pendingWake.has(chatKey)) clearTimeout(this.wakeTimers.get(chatKey));
     this.pendingWake.add(chatKey);
@@ -292,6 +327,7 @@ export class Orchestrator {
     }
 
     const timer = setTimeout(() => {
+      this.wakeTimers.delete(chatKey);
       this.pendingWake.delete(chatKey);
       const waitingId = this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
@@ -304,8 +340,7 @@ export class Orchestrator {
         return;
       }
       this.wake(chatKey, { waitingSessionId: waitingId ?? null, reuseSessionId: reuseSessionId ?? null })
-        .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error))
-        .finally(() => this.predictRolls.delete(chatKey));
+        .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error));
     }, ms);
     this.wakeTimers.set(chatKey, timer);
   }
@@ -322,12 +357,16 @@ export class Orchestrator {
 
   #scheduleUnreadFallback(chatKey, ms) {
     this.#cancelUnreadFallback(chatKey);
+    if (this.unreadFallbackTimers.size >= Math.max(1, Number(getConfig().maxPendingChats) || 32)) {
+      this.#deferBacklog(chatKey);
+      return;
+    }
     const delay = Math.max(0, Number(ms) || 0);
     const timer = setTimeout(() => {
       this.unreadFallbackTimers.delete(chatKey);
       // 到点仍是"空闲 + 无等待会话"才标已读：期间有新消息会先走 onIncoming
       // 取消本定时器，有会话触发则由 wake 的 cancel 接管。
-      if (this.paused || this.aborted || this.runningChats.has(chatKey) || this.pendingWake.has(chatKey)) return;
+      if (this.paused || this.aborted || this.runningChats.has(chatKey) || this.pendingWake.has(chatKey) || !this.#serverCanWake(chatKey)) return;
       const marked = this.store.markAllRead(chatKey);
       if (marked > 0) {
         this.emit('chat-update', chatKey);
@@ -367,14 +406,115 @@ export class Orchestrator {
 
   /** 手动触发一次处理（UI 按钮）。 */
   forceWake(chatKey) {
-    if (this.runningChats.has(chatKey)) return false;
+    if (this.runningChats.has(chatKey) || !this.#serverCanWake(chatKey)) return false;
     this.scheduleWake(chatKey, 0);
     return true;
   }
 
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
-  async wake(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
+  #slots() { return this.reservedChats.size + this.backgroundRuns; }
+
+  #serverCanWake(chatKey) {
+    if (!isServerMode()) return true;
+    const [kind, id] = String(chatKey).split(':'); const cfg = getConfig();
+    if (!['group', 'private'].includes(kind) || !/^\d+$/.test(id || '')) return false;
+    const deny = cfg.deny?.[kind] ?? cfg.deny?.[`${kind}s`] ?? [];
+    if (deny.map(String).includes(id)) return false;
+    const allow = cfg.allow?.[kind] ?? cfg.allow?.[`${kind}s`] ?? [];
+    if (allow.length ? !allow.map(String).includes(id) : cfg.allowAllWhenEmpty !== true) return false;
+    if (!this.onebot.connected) { this.backlogDeferred = true; return false; }
+    return true;
+  }
+
+  #track(promise) {
+    const tracked = promise.finally(() => this.inflight.delete(tracked));
+    this.inflight.add(tracked); return tracked;
+  }
+
+  #deferBacklog(chatKey) {
+    if (!this.backlogDeferred) logger.warn('queue', '待运行会话队列已满，未读消息已保留在磁盘，空闲后继续处理');
+    this.backlogDeferred = true;
+    this.emit('chat-update', chatKey);
+    if (!this.backlogTimer) {
+      this.backlogTimer = setTimeout(() => {
+        this.backlogTimer = null;
+        this.#drainPending();
+      }, 3000);
+      this.backlogTimer.unref?.();
+    }
+  }
+
+  #drainPending() {
+    if (this.aborted || this.paused) return;
+    if (isServerMode() && !this.onebot.connected) { this.backlogDeferred = true; return; }
+    const concurrency = Math.max(1, Number(getConfig().maxConcurrentRuns) || 2);
+    while (this.pendingRuns.size && this.#slots() < concurrency) {
+      const [chatKey, opts] = this.pendingRuns.entries().next().value;
+      this.pendingRuns.delete(chatKey);
+      this.wake(chatKey, opts).catch((error) => logger.error('queue', error));
+    }
+    if (!this.backlogDeferred || !String(getConfig().api?.model || '').trim()) return;
+    const cap = Math.max(1, Number(getConfig().maxPendingChats) || 32);
+    if (this.pendingRuns.size + this.pendingWake.size >= cap) { this.#deferBacklog(''); return; }
+    const chats = this.store.listChats();
+    let deferred = false;
+    const start = this.backlogCursor % Math.max(1, chats.length);
+    for (let i = 0; i < chats.length; i++) {
+      const chatKey = chats[(start + i) % chats.length];
+      if (!this.#serverCanWake(chatKey)) continue;
+      if (this.reservedChats.has(chatKey) || this.pendingRuns.has(chatKey) || this.pendingWake.has(chatKey) || this.unreadFallbackTimers.has(chatKey)) continue;
+      if (this.store.unreadCount(chatKey) <= 0) continue;
+      if (this.pendingRuns.size + this.pendingWake.size >= cap) { deferred = true; break; }
+      this.scheduleWake(chatKey, 0);
+      this.backlogCursor = (start + i + 1) % Math.max(1, chats.length);
+    }
+    this.backlogDeferred = deferred;
+    if (deferred) this.#deferBacklog('');
+  }
+
+  wake(chatKey, opts = {}) { return this.#track(this.#wake(chatKey, opts)); }
+
+  async #wake(chatKey, opts = {}) {
+    if (this.aborted || (this.paused && !opts.proactive)) {
+      if (opts.waitingSessionId) this.#finishWaiting(opts.waitingSessionId, 'aborted');
+      return;
+    }
+    if (!this.#serverCanWake(chatKey)) {
+      if (opts.waitingSessionId) this.#finishWaiting(opts.waitingSessionId, 'aborted');
+      if (opts.reuseSessionId) this.sessions.finish(opts.reuseSessionId, 'aborted');
+      return;
+    }
+    if (this.reservedChats.has(chatKey) || this.runningChats.has(chatKey)) return;
+    if (this.#slots() >= Math.max(1, Number(getConfig().maxConcurrentRuns) || 2)) {
+      const cap = Math.max(1, Number(getConfig().maxPendingChats) || 32);
+      if (this.pendingRuns.has(chatKey)) return;
+      if (this.pendingRuns.size + this.pendingWake.size >= cap) {
+        if (opts.waitingSessionId) this.#finishWaiting(opts.waitingSessionId, 'aborted', '队列满，未读消息已保留，稍后继续');
+        if (opts.reuseSessionId) {
+          const reused = this.sessions.current.get(opts.reuseSessionId);
+          if (reused) { reused.error = '队列满，未读消息已保留，请稍后重试'; this.sessions.finish(reused.id, 'error'); }
+        }
+        this.#deferBacklog(chatKey);
+        return { deferred: true };
+      }
+      this.pendingRuns.set(chatKey, opts);
+      return { queued: true };
+    }
+    this.reservedChats.add(chatKey);
+    try { return await this.#wakeReserved(chatKey, opts); }
+    finally {
+      this.reservedChats.delete(chatKey);
+      this.predictRolls.delete(chatKey);
+      this.#drainPending();
+      this.#maybeConsolidateMemory(chatKey);
+      for (const map of [this.chatNameCache, this.runSeq, this.#muteCache, this.activeTopics]) {
+        while (map.size > 256) map.delete(map.keys().next().value);
+      }
+    }
+  }
+
+  async #wakeReserved(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
@@ -391,33 +531,16 @@ export class Orchestrator {
     // 已读（不丢消息，解除后还能作为历史上下文），直接返回，不创建会话。
     if (String(chatKey).startsWith('group:')) {
       const muted = await this.#checkSelfMuted(chatKey);
+      if (this.aborted || (this.paused && !proactive) || !this.#serverCanWake(chatKey)) {
+        if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted');
+        return;
+      }
       if (muted) {
         const marked = this.store.markAllRead(chatKey);
         if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '机器人被禁言');
         this.emit('chat-update', chatKey);
         return;
       }
-    }
-
-    // 全局并发限制：满了就稍后重试
-    if (this.runningChats.size >= Math.max(1, Number(getConfig().maxConcurrentRuns) || 2)) {
-      if (waitingSessionId) {
-        const s = this.sessions.get(waitingSessionId);
-        // sessions.get 判过 status 后 current.get 仍可能是 undefined
-        // （等待会话恰好在两次读取之间被 discard），必须再判一层再写属性
-        const live = s && s.status === 'waiting' ? this.sessions.current.get(waitingSessionId) : null;
-        if (live) {
-          live.waitUntil = Date.now() + 3000;
-          this.sessions.update(waitingSessionId);
-          this.emit('session-update', waitingSessionId);
-        }
-      }
-      setTimeout(() => {
-        if (!this.runningChats.has(chatKey) && !this.paused && !this.aborted) {
-          this.scheduleWake(chatKey, 0);
-        }
-      }, 3000);
-      return;
     }
 
     // ── 档位：先判断"这批消息值不值得回应"，再决定要不要取走未读 ──
@@ -596,7 +719,7 @@ export class Orchestrator {
         // 用户手动中止（「中止」按钮）打断在途请求时，错误从 #runAgent 一路上抛
         // 到这里 —— 不能记成 error：那会让 UI 亮出"重试"按钮（中止不该重试），
         // 也会让会话账面状态与实际发生的事对不上。按 aborted 收尾（2026-09-19 修）。
-        if (this.sessionAbortMarks.has(session.id)) {
+        if (this.aborted || this.sessionAbortMarks.has(session.id)) {
           this.sessionAbortMarks.delete(session.id);
           this.sessionAbortControllers.delete(session.id);
           session.error = null;
@@ -955,7 +1078,7 @@ export class Orchestrator {
         });
         return;
       }
-      if (this.aborted) {
+      if (this.aborted || !this.#serverCanWake(chatKey)) {
         // 与其它终态（error / done / noreply / #finishWaiting）保持一致：必须 emit session-end。
         // 漏掉的话 UI 里这条会话会一直停在"运行中"，pendingSessionDetail 也不清，
         // 要等下一次轮询才恢复 —— 这正是"点了暂停后会话页像卡住"的成因。
@@ -1333,11 +1456,13 @@ export class Orchestrator {
   startReminderLoop() {
     this.stopReminderLoop();
     if (!this.reminders) return;
+    const generation = this.reminderGeneration;
     const tick = async () => {
-      if (this.aborted) return;
+      if (this.aborted || generation !== this.reminderGeneration) return;
       try {
         const dueList = this.reminders.due(Date.now());
         for (const r of dueList) {
+          if (this.aborted || generation !== this.reminderGeneration) break;
           if (this.reminderFiring.has(r.id)) continue;
           this.reminderFiring.add(r.id);
           try {
@@ -1355,12 +1480,13 @@ export class Orchestrator {
       } catch (error) {
         console.error('[reminder] 调度出错:', error?.message ?? error);
       }
-      this.reminderTimer = setTimeout(() => { tick().catch(() => {}); }, 20000);
+      if (!this.aborted && generation === this.reminderGeneration) this.reminderTimer = setTimeout(() => { this.#track(tick()).catch(() => {}); }, 20000);
     };
-    this.reminderTimer = setTimeout(() => { tick().catch(() => {}); }, 5000);   // 启动 5s 后第一次检查
+    this.reminderTimer = setTimeout(() => { this.#track(tick()).catch(() => {}); }, 5000);   // 启动 5s 后第一次检查
   }
 
   stopReminderLoop() {
+    this.reminderGeneration++;
     if (this.reminderTimer) { clearTimeout(this.reminderTimer); this.reminderTimer = null; }
   }
 
@@ -1493,6 +1619,7 @@ export class Orchestrator {
       if (this.paused || this.aborted) return;
       if (!cfg.api?.model || !cfg.api?.baseUrl) return;   // 没选模型就不整理
       if (this.consolidating.has(chatKey)) return;
+      if (this.pendingRuns.size || this.pendingWake.size || this.#slots() >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) return;
       const st = this.memory.consolidationState(chatKey);
       // 阈值可配置：config.memory.consolidateMinImpressions（默认取类常量）
       // 注意：这里原先误写成裸标识符 T，运行时会抛 ReferenceError 导致自动整理彻底失效。
@@ -1531,7 +1658,22 @@ export class Orchestrator {
    *   3) 仍匹配不到但有名字 → 允许整理（历史遗留的"按名字存"条目不能永远排队）；
    *   4) 既无名也无号 → 跳过。
    */
-  async consolidateMemoryForChat(chatKey, { userIds = null, force = false } = {}) {
+  consolidateMemoryForChat(chatKey, options = {}) { return this.#track(this.#consolidateMemory(chatKey, options)); }
+
+  async #consolidateMemory(chatKey, { userIds = null, force = false } = {}) {
+    const cfg = getConfig();
+    if (this.aborted || this.paused) throw new Error('QQA 已暂停，无法整理记忆');
+    if (this.backgroundControllers.has(chatKey)) throw new Error('此会话的记忆正在整理');
+    if (this.#slots() >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2) || this.pendingRuns.size || this.pendingWake.size) {
+      throw new Error('聊天任务正在运行或排队，请空闲时再整理记忆');
+    }
+    this.backgroundRuns++;
+    this.backgroundControllers.set(chatKey, new AbortController());
+    try { return await this.#consolidateMemoryReserved(chatKey, { userIds, force }); }
+    finally { this.backgroundRuns--; this.backgroundControllers.delete(chatKey); this.#drainPending(); }
+  }
+
+  async #consolidateMemoryReserved(chatKey, { userIds = null, force = false } = {}) {
     const cfg = getConfig();
     if (!cfg.api?.model || !cfg.api?.baseUrl) throw new Error('模型未配置，无法整理记忆');
     const notes = cfg.memberNotes || {};
@@ -1766,7 +1908,7 @@ export class Orchestrator {
     const res = await this.#memoryChat([
       { role: 'system', content: system },
       { role: 'user', content: user }
-    ]);
+    ], this.backgroundControllers.get(chatKey)?.signal);
 
     const parsed = extractJsonObject(String(res?.message?.content ?? ''));
     if (!parsed) {
@@ -1845,11 +1987,11 @@ export class Orchestrator {
    * useChatModel=true 时跟随聊天模型（cfg.api.*）；
    * false 时使用 cfg.memory.provider/model 指向的目录模型（端点/密钥取自 providers）。
    */
-  async #memoryChat(messages) {
+  async #memoryChat(messages, signal) {
     const cfg = getConfig();
     const mem = cfg.memory || {};
     if (mem.useChatModel !== false) {
-      return chatCompletion({ messages, temperature: 0.2 });
+      return chatCompletion({ messages, temperature: 0.2, signal });
     }    const providers = currentProviders();
     const p = providers.find((x) => x.id === mem.provider);
     if (!p?.baseURL || !p?.apiKey || !mem.model) {
@@ -1857,6 +1999,7 @@ export class Orchestrator {
     }
     return chatCompletion({
       messages,
+      signal,
       temperature: 0.2,
       overrides: { baseUrl: p.baseURL, apiKey: p.apiKey, model: mem.model, timeoutMs: 180000 }
     });
@@ -1895,6 +2038,14 @@ export class Orchestrator {
   abortSession(sessionId) {
     const id = String(sessionId || '');
     if (!id) return { ok: false, reason: '缺少会话 id' };
+    for (const [chatKey, opts] of this.pendingRuns) {
+      if (opts.waitingSessionId === id || opts.reuseSessionId === id) {
+        this.pendingRuns.delete(chatKey);
+        if (opts.waitingSessionId) this.#discardWaiting(id);
+        else this.sessions.finish(id, 'aborted');
+        return { ok: true };
+      }
+    }
     // 等待中：撤掉防抖定时器，让等待会话干净消失（不算"中止"，没花过 token）
     for (const [chatKey, waitingId] of this.pendingSessions.entries()) {
       if (waitingId === id) {
@@ -1928,6 +2079,20 @@ export class Orchestrator {
 
   async abortAll() {
     this.aborted = true;
+    if (this.backlogTimer) clearTimeout(this.backlogTimer);
+    this.backlogTimer = null;
+    this.backlogDeferred = false;
+    for (const opts of this.pendingRuns.values()) {
+      if (opts.waitingSessionId) this.#finishWaiting(opts.waitingSessionId, 'aborted');
+      if (opts.reuseSessionId) this.sessions.finish(opts.reuseSessionId, 'aborted');
+    }
+    this.pendingRuns.clear();
+    for (const controller of this.sessionAbortControllers.values()) {
+      try { controller.abort(new Error('QQA 已停止')); } catch { /* Already stopped. */ }
+    }
+    for (const controller of this.backgroundControllers.values()) {
+      try { controller.abort(new Error('QQA 已停止')); } catch { /* Already stopped. */ }
+    }
     for (const timer of this.wakeTimers.values()) clearTimeout(timer);
     this.wakeTimers.clear();
     for (const timer of this.unreadFallbackTimers.values()) clearTimeout(timer);
@@ -1936,6 +2101,10 @@ export class Orchestrator {
     for (const sessionId of this.pendingSessions.values()) this.#finishWaiting(sessionId, 'aborted');
     this.pendingSessions.clear();
     this.stopProactiveLoop();
+    this.stopReminderLoop();
+    // Abort signals stop HTTP work, while tools may still be unwinding. Keep
+    // SQLite and the instance lock alive until every tracked continuation ends.
+    await Promise.allSettled([...this.inflight]);
   }
 
   statusSummary() {
@@ -1946,6 +2115,10 @@ export class Orchestrator {
       running: [...this.runningChats],
       activeSessions: [...this.activeRuns.entries()].map(([chatKey, sessionId]) => ({ chatKey, sessionId })),
       consolidating: [...this.consolidating],
+      queued: [...this.pendingRuns.keys()],
+      pendingChats: this.pendingRuns.size + this.pendingWake.size,
+      backlogDeferred: this.backlogDeferred,
+      backgroundRuns: this.backgroundRuns,
       onebotConnected: this.onebot.connected,
       model: cfg.api.model,
       maxConcurrentRuns: cfg.maxConcurrentRuns

@@ -1,0 +1,19 @@
+[Unit]
+Description=QQ Agent fixed component action
+
+[Service]
+Type=exec
+User=root
+ExecStart=/usr/bin/python3 @INSTALL_ROOT@/current/scripts/server/component-broker.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=30s
+TimeoutStopSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true

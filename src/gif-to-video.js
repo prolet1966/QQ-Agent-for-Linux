@@ -25,8 +25,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
 import { detectImageType } from './image-type.js';
+import { getConfig } from './config.js';
+import { runMediaProcess } from './media-process.js';
+import { mediaMaxBytes } from './media-resources.js';
 
 /** 转换后最大边（像素）。 */
 export const GIF_VIDEO_MAX_DIM = 480;
@@ -35,19 +37,7 @@ export const GIF_VIDEO_MAX_FRAMES = 24;
 
 /** 调外部命令，只看退出码；失败/超时返回 false（不抛）。 */
 function runOk(cmd, args, timeoutMs = 30000) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
-    } catch {
-      return finish(false);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(false); }, timeoutMs);
-    child.on('error', () => { clearTimeout(timer); finish(false); });
-    child.on('close', (code) => { clearTimeout(timer); finish(code === 0); });
-  });
+  return runMediaProcess(cmd, args, timeoutMs).then(Boolean);
 }
 
 /** ffmpeg 探测（成功长期缓存；没找到 60 秒后允许重探——用户装好后不用重启）。 */
@@ -88,6 +78,7 @@ export function isGifBuffer(buf) {
  *   失败（没 ffmpeg / 转换出错 / 产出异常）返回 null，调用方回退到按图片发送。
  */
 export async function gifToVideoDataUrl(buffer) {
+  if (getConfig().resources?.localMedia === false || buffer.length > mediaMaxBytes()) return null;
   const type = detectImageType(buffer);
   if (!type || type.mime !== 'image/gif') return null;
   const ffmpeg = await findFfmpeg();
@@ -129,10 +120,12 @@ export async function gifToVideoDataUrl(buffer) {
       '-frames:v', String(GIF_VIDEO_MAX_FRAMES),
       '-an',
       '-pix_fmt', 'yuv420p',
+      '-threads', '1', '-fs', String(mediaMaxBytes(8 * 1024 * 1024)),
       '-movflags', '+faststart',
       tmpOut
     ], 45000);
     if (!okRun || !fs.existsSync(tmpOut)) return null;
+    if (fs.statSync(tmpOut).size > mediaMaxBytes(8 * 1024 * 1024)) return null;
     const out = fs.readFileSync(tmpOut);
     // 产出为空或大得离谱（>8MB）都视为异常：正常 480px/24帧 的 mp4 不会超过几百 KB
     if (!out.length || out.length > 8 * 1024 * 1024) return null;
@@ -180,21 +173,7 @@ async function probeVideoSize(file) {
 
 /** 调外部命令并收集 stdout；失败/超时返回 null。 */
 function runStdout(cmd, args, timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    let out = '';
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    } catch {
-      return finish(null);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(null); }, timeoutMs);
-    child.stdout.on('data', (d) => { out += d; });
-    child.on('error', () => { clearTimeout(timer); finish(null); });
-    child.on('close', () => { clearTimeout(timer); finish(out || null); });
-  });
+  return runMediaProcess(cmd, args, timeoutMs).then((r) => r?.stdout || null);
 }
 
 /**
@@ -221,6 +200,7 @@ export function resolveGifRoute({ vision = true, video = false } = {}) {
  * 提取失败（没 ffmpeg / 文件异常）返回 null，调用方退回原样发送。
  */
 export async function gifFirstFrameDataUrl(buffer) {
+  if (getConfig().resources?.localMedia === false || buffer.length > mediaMaxBytes()) return null;
   const ffmpeg = await findFfmpeg();
   if (!ffmpeg) return null;
   const stamp = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -236,9 +216,11 @@ export async function gifFirstFrameDataUrl(buffer) {
       '-vf', "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease",
       '-frames:v', '1',
       '-an',
+      '-threads', '1', '-fs', String(mediaMaxBytes(4 * 1024 * 1024)),
       tmpOut
     ], 20000);
     if (!okRun || !fs.existsSync(tmpOut)) return null;
+    if (fs.statSync(tmpOut).size > mediaMaxBytes(4 * 1024 * 1024)) return null;
     const out = fs.readFileSync(tmpOut);
     if (!out.length || out.length > 4 * 1024 * 1024) return null;
     return `data:image/png;base64,${out.toString('base64')}`;

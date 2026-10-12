@@ -3,7 +3,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR } from './config.js';
+import { Worker } from 'node:worker_threads';
+import { DATA_DIR, getConfig } from './config.js';
+import { openSessionIndex, summarizeSession } from './session-index.js';
+import { isServerMode } from './runtime.js';
+import { activeSessionDetail, detailWindow } from './session-detail.js';
+import { BoundedWorkQueue } from './bounded-work.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 // 索引缓存：启动加速的关键。没有它时 #loadIndex 要逐个 readFileSync+JSON.parse
@@ -11,6 +16,7 @@ const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 // ~0.5MB 的单文件（3ms 级）。缓存与磁盘文件的增量校验在后台异步做（见
 // reconcileInBackground），所以缓存缺失/过期都只是"首次启动慢"，不会错。
 const INDEX_CACHE_FILE = path.join(DATA_DIR, 'session-index-cache.json');
+const SERVER_FULL_HISTORY_BYTES = 8 * 1024 * 1024;
 // v2：摘要里新增了 toolCalls（工具调用次数）。旧缓存里的条目没有这个字段，
 //     而这正是"缓存只有摘要、没有 messages"所以算不出来的情况 —— 只能让版本号失效，
 //     启动时从会话文件重建一次索引把计数补上。一次性代价，之后照旧走缓存。
@@ -56,7 +62,11 @@ export class SessionRegistry {
     this.keepFiles = Math.max(0, Number.isFinite(Number(keepFiles)) ? Math.round(Number(keepFiles)) : 0);
     this.index = [];   // [{ id, chatKey, startedAt, endedAt, status, outcome, usage, trigger, model, promptChars }]
     this.current = new Map(); // id -> session object（运行中的在内存里）
+    this.detailQueue = new BoundedWorkQueue({ concurrency: 1, capacity: 4, maxWaitMs: 30000, name: '会话详情' });
+    this.detailJobs = new Set();
+    this.closed = false;
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    this.summaryIndex = openSessionIndex();
     this.#loadIndex();
   }
 
@@ -86,12 +96,19 @@ export class SessionRegistry {
       );
       for (const f of files.slice(this.keepFiles)) {
         if (activeIds.has(f.replace(/\.json$/, ''))) continue;
-        try { fs.rmSync(path.join(SESSIONS_DIR, f), { force: true }); } catch { /* ignore */ }
+        try {
+          fs.rmSync(path.join(SESSIONS_DIR, f), { force: true });
+          this.summaryIndex?.remove(f.slice(0, -5));
+        } catch { /* ignore */ }
       }
     } catch { /* ignore */ }
   }
 
   #loadIndex() {
+    if (this.summaryIndex) {
+      this.index = this.summaryIndex.list(this.#indexLimit());
+      return;
+    }
     // ── 快路径：读索引缓存（单文件，毫秒级）──
     // 缓存条目 = 磁盘上全部会话的 summary；启动直接用它当 this.index，
     // 后台再异步对账（#rebuildIndexInBackground）修正差异（外部删文件/
@@ -152,7 +169,10 @@ export class SessionRegistry {
         data.abortedOnBoot = true;   // 标记来源，UI/排障能分清"用户中止"和"重启遗留"
         try { fs.writeFileSync(path.join(SESSIONS_DIR, file), JSON.stringify(data)); } catch { /* 写不回就只改内存视图 */ }
       }
-      this.index.push(this.#summary(data));
+      const summary = this.#summary(data);
+      this.summaryIndex?.put(summary);
+      this.index.push(summary);
+      if (this.summaryIndex && this.index.length > this.#indexLimit() * 2) this.#sortIndex();
     } catch { /* 跳过坏文件 */ }
   }
 
@@ -181,7 +201,10 @@ export class SessionRegistry {
 
   #sortIndex() {
     this.index.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+    if (this.summaryIndex) this.index = this.index.slice(0, this.#indexLimit());
   }
+
+  #indexLimit() { return Math.max(32, Math.min(1000, Number(getConfig().resources?.usageCacheSessions) || 256)); }
 
   /** 读索引缓存；版本不匹配/损坏返回 null。 */
   #readIndexCache() {
@@ -194,6 +217,7 @@ export class SessionRegistry {
 
   /** 写索引缓存（写前剔除运行中的：它们还没落成最终态，写进去是过期视图）。 */
   #writeIndexCache() {
+    if (this.summaryIndex) { this.summaryIndex.checkpoint(); return; }
     try {
       const currentIds = new Set(this.current.keys());
       const entries = this.index.filter((e) => !currentIds.has(e.id));
@@ -233,6 +257,7 @@ export class SessionRegistry {
   reconcileInBackground() {
     if (this.#reconcileStarted) return Promise.resolve();
     this.#reconcileStarted = true;
+    if (this.summaryIndex) return this.#reconcileSummaryDatabase();
     return new Promise((resolve) => {
       setImmediate(() => {
         try {
@@ -260,24 +285,30 @@ export class SessionRegistry {
   }
   #reconcileStarted = false;
 
+  #reconcileSummaryDatabase() {
+    this.indexing = true;
+    return new Promise((resolve) => {
+      const worker = new Worker(new URL('./session-index-worker.js', import.meta.url), {
+        workerData: { activeIds: [...this.current.keys()], startedAt: Date.now() },
+        resourceLimits: { maxOldGenerationSizeMb: 96 }
+      });
+      this.indexWorker = worker;
+      worker.on('message', (message) => {
+        this.indexProgress = { indexed: message.indexed || 0, failed: message.failed || 0 };
+        if (message.warning) console.warn('[sessions]', message.warning);
+      });
+      worker.on('error', (error) => { console.warn('[sessions] 摘要索引更新失败:', error?.message ?? error); });
+      worker.on('exit', () => {
+        this.indexing = false;
+        this.indexWorker = null;
+        this.index = this.summaryIndex?.list(this.#indexLimit()) || this.index;
+        resolve();
+      });
+    });
+  }
+
   #summary(s) {
-    return {
-      id: s.id,
-      chatKey: s.chatKey,
-      startedAt: s.startedAt,
-      endedAt: s.endedAt ?? null,
-      status: s.status,                      // waiting | running | done | noreply | error | aborted
-      waitUntil: s.waitUntil ?? null,
-      activity: s.activity ?? '',
-      webSearchCount: s.webSearchCount ?? 0,
-      toolCalls: toolCallCount(s),            // 工具调用次数（列表行要显示，见 toolCallCount 的说明）
-      outcome: s.outcome ?? null,            // { sent: n, finishReason }
-      usage: s.usage ?? null,
-      model: s.model ?? '',
-      trigger: s.triggerSummary ?? '',
-      promptChars: s.promptChars ?? 0,
-      rounds: s.rounds ?? 0
-    };
+    return summarizeSession(s, toolCallCount(s));
   }
 
   create({ chatKey, trigger, triggerSummary, status = 'running', waitUntil = null }) {
@@ -307,6 +338,7 @@ export class SessionRegistry {
     this.current.set(session.id, session);
     this.#persist(session);
     this.index.unshift(this.#summary(session));
+    if (this.summaryIndex) this.index = this.index.slice(0, this.#indexLimit());
     if (this.keepFiles > 0) this.index = this.index.slice(0, this.keepFiles);
     this.#scheduleIndexCacheWrite();
     return session;
@@ -318,11 +350,52 @@ export class SessionRegistry {
       return structuredClone(s);
     }
     try {
+      this.#checkFullHistoryBudget(id);
       const data = JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
-      return data;
-    } catch {
+      return this.#applyRecoveredState(id, data);
+    } catch (error) {
+      if (error?.expose) throw error;
       return null;
     }
+  }
+
+  #checkFullHistoryBudget(id) {
+    if (isServerMode() && fs.statSync(sessionFile(id)).size > SERVER_FULL_HISTORY_BYTES) {
+      throw Object.assign(new Error('历史会话档案超过 8 MiB，无法完整读取或重试。请下载完整会话档案，并发起新会话继续。'), { status: 413, expose: true });
+    }
+  }
+
+  /** HTTP display path: one bounded worker and page, never parse an archive on the main thread. */
+  async getDetail(id, options = {}) {
+    if (!isServerMode()) return this.get(id);
+    if (this.closed) throw Object.assign(new Error('会话详情服务已关闭'), { status: 503, expose: true });
+    if (!/^[\w-]+$/.test(String(id))) return null;
+    const active = this.current.get(id);
+    if (active) return activeSessionDetail(active, options);
+    try { const stat = await fs.promises.stat(sessionFile(id)); if (!stat.isFile()) return null; }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    const job = this.detailQueue.run(async () => {
+      if (this.closed) throw Object.assign(new Error('会话详情服务已关闭'), { status: 503, expose: true });
+      const data = await new Promise((resolve, reject) => {
+        const worker = new Worker(new URL('./session-detail-worker.js', import.meta.url), {
+          workerData: { file: sessionFile(id), ...detailWindow(options) },
+          resourceLimits: { maxOldGenerationSizeMb: 96, maxYoungGenerationSizeMb: 16 }
+        });
+        let result, failure;
+        const timer = setTimeout(() => { failure = Object.assign(new Error('会话详情读取超时，请下载完整档案查看'), { status: 504, expose: true }); worker.terminate(); }, 120000);
+        worker.on('message', message => {
+          if (message.error) failure = Object.assign(new Error('无法分页显示此档案，请下载完整档案查看：' + message.error), { status: message.status || 422, expose: true });
+          else result = message.value;
+        });
+        worker.on('error', error => { failure = Object.assign(new Error('会话详情读取失败，请下载完整档案查看：' + error.message), { status: 422, expose: true }); });
+        worker.on('exit', () => { clearTimeout(timer); if (failure) reject(failure); else if (result) resolve(result); else reject(new Error('会话详情读取线程已退出')); });
+      });
+      return this.#applyRecoveredState(id, data);
+    });
+    this.detailJobs.add(job);
+    try { return await job; }
+    catch (error) { if (/队列已满|排队超时/.test(error.message)) Object.assign(error, { status: 429, expose: true }); throw error; }
+    finally { this.detailJobs.delete(job); }
   }
 
   /**
@@ -334,8 +407,10 @@ export class SessionRegistry {
   peek(id) {
     if (this.current.has(id)) return this.current.get(id);
     try {
-      return JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
-    } catch {
+      this.#checkFullHistoryBudget(id);
+      return this.#applyRecoveredState(id, JSON.parse(fs.readFileSync(sessionFile(id), 'utf8')));
+    } catch (error) {
+      if (error?.expose) throw error;
       return null;
     }
   }
@@ -344,6 +419,7 @@ export class SessionRegistry {
     const s = this.current.get(id);
     if (s) {
       this.#persistThrottled(s);
+      this.summaryIndex?.put(this.#summary(s));
       const idx = this.index.findIndex((e) => e.id === id);
       if (idx >= 0) this.index[idx] = this.#summary(s);
     }
@@ -370,17 +446,7 @@ export class SessionRegistry {
     const idx = this.index.findIndex((e) => e.id === id);
     if (idx >= 0) this.index[idx] = this.#summary(s);
     this.#scheduleIndexCacheWrite();
-    // 清理超出保留数的旧文件
-    try {
-      if (this.keepFiles > 0) {
-        const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json')).sort();
-        if (files.length > this.keepFiles) {
-          for (const f of files.slice(0, files.length - this.keepFiles)) {
-            try { fs.unlinkSync(path.join(SESSIONS_DIR, f)); } catch { /* ignore */ }
-          }
-        }
-      }
-    } catch { /* ignore */ }
+    this.#pruneFiles();
     return s;
   }
 
@@ -401,6 +467,7 @@ export class SessionRegistry {
     // 已运行过的不允许丢弃（会抹掉用量/成本记录，导致对不上账）
     if (s && s.status !== 'waiting') return false;
     this.current.delete(id);
+    this.summaryIndex?.remove(id);
     const before = this.index.length;
     this.index = this.index.filter((e) => e.id !== id);
     try {
@@ -422,7 +489,9 @@ export class SessionRegistry {
     const s = this.current.get(id);
     // 正在运行的会话不能删（usage 还在累加，删了账就乱了）；等待中的可以
     if (s && s.status === 'running') return false;
+    const indexed = this.summaryIndex?.has(id) || false;
     this.current.delete(id);
+    this.summaryIndex?.remove(id);
     const before = this.index.length;
     this.index = this.index.filter((e) => e.id !== id);
     try {
@@ -430,7 +499,7 @@ export class SessionRegistry {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     } catch { /* ignore */ }
     this.#scheduleIndexCacheWrite();
-    return this.index.length < before;
+    return indexed || this.index.length < before;
   }
 
   /**
@@ -438,6 +507,24 @@ export class SessionRegistry {
    * @returns {number} 删掉了多少条
    */
   clearFinished() {
+    if (this.summaryIndex) {
+      let removed = 0;
+      let offset = 0;
+      for (;;) {
+        const rows = this.summaryIndex.list(256, offset);
+        if (!rows.length) break;
+        let active = 0;
+        for (const row of rows) {
+          if (this.current.has(row.id)) { active++; continue; }
+          try { fs.unlinkSync(sessionFile(row.id)); } catch { /* Existing clear semantics. */ }
+          this.summaryIndex.remove(row.id);
+          removed++;
+        }
+        offset += active;
+      }
+      this.index = this.summaryIndex.list(this.#indexLimit());
+      return removed;
+    }
     const keepIds = new Set();
     for (const [id, s] of this.current) {
       if (s && (s.status === 'running' || s.status === 'waiting')) keepIds.add(id);
@@ -457,8 +544,29 @@ export class SessionRegistry {
     return removed;
   }
 
-  listSummaries(limit = 100) {
-    return this.index.slice(0, limit);
+  listSummaries(limit = 100, offset = 0) {
+    const size = Math.min(500, Math.max(1, Math.floor(Number(limit) || 100)));
+    const start = Math.max(0, Math.floor(Number(offset) || 0));
+    return this.summaryIndex ? this.summaryIndex.list(size, start) : this.index.slice(start, start + size);
+  }
+
+  summaryCount() { return this.summaryIndex ? this.summaryIndex.count() : this.index.length; }
+
+  #applyRecoveredState(id, data) {
+    const summary = this.summaryIndex?.get(id);
+    if (summary?.abortedOnBoot && (data.status === 'running' || data.status === 'waiting')) {
+      data.status = 'aborted'; data.endedAt = summary.endedAt; data.abortedOnBoot = true;
+    }
+    return data;
+  }
+
+  async close() {
+    this.closed = true;
+    await Promise.allSettled([...this.detailJobs]);
+    if (this.indexWorker) await this.indexWorker.terminate();
+    this.flushIndexCache();
+    this.summaryIndex?.close();
+    this.summaryIndex = null;
   }
 
   /** 今日 token 统计（含运行中的）。 */
@@ -564,6 +672,7 @@ export class SessionRegistry {
       const tmp = `${sessionFile(s.id)}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(s, null, 1), 'utf8');
       fs.renameSync(tmp, sessionFile(s.id));
+      this.summaryIndex?.put(this.#summary(s), fs.statSync(sessionFile(s.id)));
       if (s.status !== 'running' && s.status !== 'waiting') this.#bumpTodayUsage(s);
     } catch (error) {
       console.error('[sessions] 持久化失败:', error?.message ?? error);

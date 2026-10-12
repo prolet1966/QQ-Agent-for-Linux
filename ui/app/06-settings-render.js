@@ -1725,9 +1725,8 @@ const MODULE_KINDS = {
     boxSel: '#skills-page',
     title: '技能（Skill）',
     dir: 'skills/',
-    emptyHint: `还没加载到任何技能。<br />LLM 型技能放在项目的 <code>skills/&lt;id&gt;/</code> 目录，需要 <code>skill.json</code> + <code>index.js</code>。`,
-    lead: `技能是 <b>LLM 型</b>扩展：它们注册工具进模型的 function 列表，<b>用不用、什么时候用由模型自己判断</b>。<br />
-      所以技能不会"一定生效" —— 模型可能一直不调用它。需要"条件满足必跑"的功能，应该做成插件（见旁边的「插件」页签）。`,
+    emptyHint: `当前没有安装技能。此版本不预装技能，请点击「＋ 添加技能」，从技能商城选择需要的功能。`,
+    lead: `技能为 AI 提供额外工具，模型会根据聊天内容选择使用。只安装需要的技能，可减少服务器资源占用。`,
     setupTitle: '新增技能',
     setupHint: `在 <code>skills/&lt;id&gt;/</code> 放 <code>skill.json</code> + <code>index.js</code>，
       导出 <code>setup(api)</code> 并在里面 <code>api.registerTool({...})</code>。
@@ -1739,10 +1738,8 @@ const MODULE_KINDS = {
     boxSel: '#plugins-page',
     title: '插件（Plugin）',
     dir: 'plugins/',
-    emptyHint: `还没加载到任何插件。<br />确定性型插件放在项目的 <code>plugins/&lt;id&gt;/</code> 目录，需要 <code>plugin.json</code> + <code>index.js</code>。`,
-    lead: `插件是 <b>确定性型</b>扩展：它们提供<b>能力</b>（<code>providers</code>）或<b>钩子</b>（<code>hooks</code>），
-      由核心代码按能力名确定性调用 —— <b>条件满足就一定会执行，不经过 LLM，模型想忽略也忽略不掉</b>。<br />
-      代价是它不能"看情况发挥"：什么时候触发必须在代码里写死。需要模型理解意图的功能，应该做成技能（见旁边的「技能」页签）。`,
+    emptyHint: `当前没有安装插件。此版本不预装插件，请点击「＋ 添加插件」，从插件商城选择需要的功能。`,
+    lead: `插件会按设置自动处理消息或增强功能。只安装需要的插件，可减少服务器资源占用。`,
     setupTitle: '新增插件',
     setupHint: `在 <code>plugins/&lt;id&gt;/</code> 放 <code>plugin.json</code> + <code>index.js</code>，
       导出 <code>setup(api)</code>，并用 <code>export const providers = {...}</code> 或 <code>export const hooks = {...}</code> 声明扩展点。
@@ -1986,8 +1983,8 @@ function renderModulePage(kind) {
   const mine = {
     total: items.length,
     active: items.filter((s) => s.active).length,
-    off: items.filter((s) => s.loaded && !s.enabled).length,
-    broken: items.filter((s) => !s.loaded).length
+    off: items.filter((s) => !s.enabled && !s.loadError).length,
+    broken: items.filter((s) => s.loadError || (s.enabled && !s.loaded)).length
   };
 
   if (!items.length) {
@@ -1999,7 +1996,7 @@ function renderModulePage(kind) {
         </div></div>
       <div class="empty-hint">${meta.emptyHint}</div>
       <div class="hint" style="margin-top:10px">${meta.lead}</div>
-      <div class="hint" style="margin-top:10px"><b>把 zip 包或整个文件夹直接拖到这一页就能装</b>，也可以点上面「＋ 添加${meta.kind === 'skill' ? '技能' : '插件'}」选「导入本地文件」。</div>
+      <div class="hint" style="margin-top:10px">已有安装包时，可把 zip 包拖到这一页，或点击「＋ 添加」选择「导入本地文件」。</div>
     </div>`;
     if (box) box.innerHTML = emptyHtml;
     bindModulePageEvents(kind);
@@ -2037,7 +2034,7 @@ function renderModulePage(kind) {
     + '<path d="M14 11v6"/>'
     + '</svg>';
   const card = (s) => {
-    const loadedOk = s.loaded;
+    const loadedOk = !s.loadError && (!s.enabled || s.loaded);
     const active = loadedOk && s.enabled && s.active;
     // 状态类名：驱动卡片边框/底色（CSS 里 .mcard-* 定义）
     const stateCls = !loadedOk ? 'mcard-broken' : (!s.enabled ? 'mcard-off' : (active ? 'mcard-on' : 'mcard-dep'));
@@ -2220,7 +2217,7 @@ function bindModulePageEvents(kind) {
   // 两者共用同一条请求链；开关上的 click 会 stopPropagation，避免卡片再触发一次。
   const toggleModule = async (id, next, busyEl) => {
     const cur = (state.skills || []).find((s) => s.id === id);
-    if (!cur || !cur.loaded) return;   // 加载失败的条目切不动
+    if (!cur || cur.loadError || (cur.enabled && !cur.loaded)) return;
     busyEl.style.pointerEvents = 'none';
     if (busyEl instanceof HTMLInputElement) busyEl.dataset.pending = '1';
     try {

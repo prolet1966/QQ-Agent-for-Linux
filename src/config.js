@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERSONAS } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
+import { runtimeDefaults, applyEnvironment } from './runtime.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
@@ -187,6 +188,8 @@ export const DEFAULT_CONFIG = {
   },
   // SnowLuma / OneBot v11
   snowluma: {
+    mode: 'local',             // external skips all local protocol management
+    independent: false,
     dir: '',                   // SnowLuma 程序目录；留空 = 自动探测项目内 ./snowluma
     autoLaunch: false,         // 应用启动时自动拉起 SnowLuma（未运行时）
     // ── 绑定 QQ 账号（多账号 / 双实例切换）──────────────────────────────
@@ -428,11 +431,18 @@ export const DEFAULT_CONFIG = {
   extensions: {
     hotReload: true
   },
+  background: { telemetry: true, usageWarm: true, priceFeed: true, mongoAutoStart: false, cacheWarm: true },
+  resources: { incomingQueue: 2048, incomingConcurrency: 2, sendQueuePerChat: 256, maxOnebotPayloadMB: 16,
+    memoryCacheChats: 128, usageCacheSessions: 1024, mediaConcurrency: 2, mediaMaxBytesMB: 32,
+    localMedia: true, mediaCacheMB: 256, mediaCacheTtlMs: 86400000 },
+  maxPendingChats: 128,
   // 桌面端/控制台
   server: {
     // 端口：QQ_AGENT_PORT 显式覆盖 > 默认 3210 + PROFILE 偏移
     // （第二实例整体 +100，避免和主实例撞端口）
-    port: Number(process.env.QQ_AGENT_PORT) || (3210 + portOffset()),
+    port: 3210 + portOffset(),
+    bindHost: '127.0.0.1', publicHost: '', allowedOrigins: [], strictPort: false,
+    auth: false, maxSseClients: 16, desktopProxy: false,
     token: '',                // 留空 = 只监听 127.0.0.1
     autoStart: false,         // 开机自启（仅 Electron 桌面端生效）
     closeToTray: true         // 点关闭 = 最小化到托盘
@@ -483,7 +493,7 @@ export function loadConfig() {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
-    return deepMerge(DEFAULT_CONFIG, migrateLegacySkills(parsed));
+    return deepMerge(deepMerge(DEFAULT_CONFIG, runtimeDefaults()), migrateLegacySkills(parsed));
   } catch (error) {
     // ⚠️ 配置文件坏了（手改错/磁盘故障）不能静默回落默认值：
     //   曾经直接返回 DEFAULT，随后任何 updateConfig（比如 5 分钟一次的
@@ -502,7 +512,7 @@ export function loadConfig() {
     } catch (backupError) {
       console.error('[config] 配置文件解析失败且备份失败：', backupError);
     }
-    return structuredClone(DEFAULT_CONFIG);
+    return deepMerge(DEFAULT_CONFIG, runtimeDefaults());
   }
 }
 
@@ -563,11 +573,13 @@ export function migrateLegacySkills(parsed) {
 }
 
 let currentConfig = null;
+let effectiveConfig = null;
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig() {
   if (!currentConfig) currentConfig = loadConfig();
-  return currentConfig;
+  if (!effectiveConfig) effectiveConfig = applyEnvironment(currentConfig);
+  return effectiveConfig;
 }
 
 /**
@@ -619,6 +631,17 @@ function preserveSanitizedSecrets(current, patch) {
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
   const cleanPatch = stripDerivedFlags(structuredClone(patch ?? {}));
+  getConfig();
+  // Callers sometimes send whole effective sections. Keep deployment overrides
+  // (especially secrets) out of the persisted user configuration.
+  const envPaths = {
+    QQ_AGENT_PORT: ['server', 'port'], QQ_AGENT_BIND_HOST: ['server', 'bindHost'],
+    QQ_AGENT_PUBLIC_HOST: ['server', 'publicHost'], QQ_AGENT_ALLOWED_ORIGINS: ['server', 'allowedOrigins'],
+    QQ_AGENT_ONEBOT_WS_URL: ['snowluma', 'wsUrl'], QQ_AGENT_ONEBOT_HTTP_URL: ['snowluma', 'httpUrl'],
+    QQ_AGENT_ONEBOT_TOKEN: ['snowluma', 'accessToken'], QQ_AGENT_ONEBOT_HTTP_TOKEN: ['snowluma', 'httpAccessToken'],
+    QQ_AGENT_PROTOCOL_MODE: ['snowluma', 'mode'], QQ_AGENT_API_KEY: ['api', 'apiKey']
+  };
+  for (const [env, [section, key]] of Object.entries(envPaths)) if (process.env[env] !== undefined && cleanPatch[section]) delete cleanPatch[section][key];
   // ── 脱敏回传的密钥保留（2026-09-19 修"搜索 Key 离开页签就消失"）──
   // 前端拿到的配置是脱敏的（apiKey 被删、hasApiKey 被加）；它把整个配置/区块
   // 回传保存时，密钥字段天然缺失。对**对象型**密钥容器 deepMerge 会保留基底值
@@ -627,31 +650,35 @@ export function updateConfig(patch) {
   // 一次普通的设置保存就把所有自定义搜索服务的 Key 静默清空（表现为掩码消失、
   // 测试报 invalid API key）。这里在合并前把"patch 条目缺密钥字段"的数组按 id
   // 回填现值；想真清除必须显式传 apiKey: ''（专用清除按钮就是显式空串路径）。
-  preserveSanitizedSecrets(getConfig(), cleanPatch);
-  currentConfig = deepMerge(getConfig(), cleanPatch);
+  preserveSanitizedSecrets(currentConfig, cleanPatch);
+  const nextConfig = deepMerge(currentConfig, cleanPatch);
   // 磁盘上可能已经存过历史遗留的派生标记，一并清掉
-  stripDerivedFlags(currentConfig);
+  stripDerivedFlags(nextConfig);
 
   // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
   // 前端只负责上报滑条位置（contextSliderPos），档位和概率一律由这里换算。
   // 这样即使前端算错、或者有人直接调接口只传位置，配置也不会自相矛盾。
-  const posRaw = currentConfig?.store?.contextSliderPos;
+  const posRaw = nextConfig?.store?.contextSliderPos;
   if (posRaw !== undefined && posRaw !== null) {
     const { tier, randomPercent } = sliderToTier(posRaw);
-    currentConfig.store.contextTier = tier;
-    currentConfig.store.randomPercent = randomPercent;
+    nextConfig.store.contextTier = tier;
+    nextConfig.store.randomPercent = randomPercent;
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
+  const nextEffective = applyEnvironment(nextConfig); // validate before writing
+  fs.writeFileSync(tmp, JSON.stringify(nextConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmp, CONFIG_FILE);
-  return currentConfig;
+  currentConfig = nextConfig;
+  effectiveConfig = nextEffective;
+  return effectiveConfig;
 }
 
 /** 内存态改动（不落盘）——用于运行期覆盖（如自测注入 mock）。 */
 export function setRuntimeConfig(cfg) {
   currentConfig = cfg;
+  effectiveConfig = null;
 }
 
 /**

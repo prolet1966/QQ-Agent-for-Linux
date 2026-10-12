@@ -16,37 +16,75 @@
 // }
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, getConfig } from './config.js';
+import { SQLiteChatStore, SQLITE_FILE, STORAGE_STATE_FILE, sqliteAvailable } from './sqlite-store.js';
+import { isServerMode } from './runtime.js';
 
-const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
-
-function chatFile(chatKey) {
+function chatFile(messagesDir, chatKey) {
   // chatKey 形如 group:123 / private:456
   const safe = String(chatKey).replace(/[^a-z0-9_]/gi, '_');
-  return path.join(MESSAGES_DIR, `${safe}.json`);
+  return path.join(messagesDir, `${safe}.json`);
 }
 
-function loadChat(chatKey) {
+function loadChat(messagesDir, chatKey, maxArchiveBytes) {
+  const file = chatFile(messagesDir, chatKey);
+  let text;
   try {
-    let text = fs.readFileSync(chatFile(chatKey), 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (parsed && Array.isArray(parsed.messages)) return parsed;
-  } catch { /* 新会话 */ }
-  return { chatKey, nextLocalId: 1, messages: [] };
+    if (fs.statSync(file).size > maxArchiveBytes) throw legacyArchiveLimit();
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return { chatKey, nextLocalId: 1, messages: [] };
+    if (error.expose) throw error;
+    throw new Error(`无法读取聊天档案，原文件已保留：${file}（${error.message}）`, { cause: error });
+  }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (error) { throw new Error(`聊天档案 JSON 损坏，原文件已保留：${file}（${error.message}）`, { cause: error }); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.messages)
+    || parsed.messages.some(message => !message || typeof message !== 'object' || Array.isArray(message))) {
+    throw new Error(`聊天档案结构异常，原文件已保留：${file}`);
+  }
+  if (parsed.chatKey != null && String(parsed.chatKey) !== String(chatKey)) throw new Error(`聊天档案 chatKey 与路径不一致，原文件已保留：${file}`);
+  // Early archives may omit these metadata fields. Repair missing metadata from
+  // the filename and existing local IDs without dropping or rebuilding records.
+  const lastLocalId = parsed.messages.reduce((maximum, message) => {
+    const id = Number(message.id);
+    return Number.isSafeInteger(id) && id > maximum ? id : maximum;
+  }, 0);
+  const nextLocalId = parsed.nextLocalId == null ? lastLocalId + 1 : Number(parsed.nextLocalId);
+  if (!Number.isSafeInteger(nextLocalId) || nextLocalId <= lastLocalId || nextLocalId < 1) {
+    throw new Error(`聊天档案 nextLocalId 无效，原文件已保留：${file}`);
+  }
+  return { ...parsed, chatKey, nextLocalId };
 }
 
-function saveChat(state) {
-  fs.mkdirSync(MESSAGES_DIR, { recursive: true });
-  const tmp = `${chatFile(state.chatKey)}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
-  fs.renameSync(tmp, chatFile(state.chatKey));
+function legacyArchiveLimit() {
+  return Object.assign(new Error('旧 JSON 聊天档案超过服务器 8 MiB 读取预算；请停止核心，备份后执行消息存储 migrate 切换到 SQLite，原档案不会被覆盖'), { status: 413, expose: true });
 }
 
-export class ChatStore {
-  constructor(maxPerChat = 0) {
+function saveChat(messagesDir, state, maxArchiveBytes) {
+  fs.mkdirSync(messagesDir, { recursive: true });
+  const tmp = `${chatFile(messagesDir, state.chatKey)}.${process.pid}.tmp`;
+  const text = JSON.stringify(state, null, 1);
+  if (Buffer.byteLength(text) > maxArchiveBytes) throw legacyArchiveLimit();
+  fs.writeFileSync(tmp, text, 'utf8');
+  fs.renameSync(tmp, chatFile(messagesDir, state.chatKey));
+  return Buffer.byteLength(text);
+}
+
+export class JSONChatStore {
+  constructor(maxPerChat = 0, { dataDir = DATA_DIR, maxCachedChats = 8, maxCacheBytes = 8 * 1024 * 1024 } = {}) {
+    this.backend = 'json';
+    this.messagesDir = path.join(dataDir, 'messages');
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
     this.chats = new Map(); // chatKey -> state
+    this.knownChats = new Set();
+    this.cacheSizes = new Map();
+    this.maxCachedChats = Math.max(1, Number(maxCachedChats) || 8);
+    this.maxCacheBytes = Math.max(1, Number(maxCacheBytes) || 8 * 1024 * 1024);
+    this.cachedBytes = 0;
+    this.maxArchiveBytes = isServerMode() ? 8 * 1024 * 1024 : Infinity;
   }
 
   setMaxPerChat(cap) {
@@ -54,21 +92,66 @@ export class ChatStore {
   }
 
   #state(chatKey) {
-    if (!this.chats.has(chatKey)) this.chats.set(chatKey, loadChat(chatKey));
-    return this.chats.get(chatKey);
+    this.knownChats.add(chatKey);
+    let state = this.chats.get(chatKey);
+    if (state) {
+      this.chats.delete(chatKey); this.chats.set(chatKey, state);
+      return state;
+    }
+    state = loadChat(this.messagesDir, chatKey, this.maxArchiveBytes);
+    let bytes = 0;
+    try { bytes = fs.statSync(chatFile(this.messagesDir, chatKey)).size; } catch { /* new chat */ }
+    this.chats.set(chatKey, state); this.cacheSizes.set(chatKey, bytes); this.cachedBytes += bytes;
+    this.#trimCache();
+    return state;
   }
 
-  listChats() {
-    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上
+  #trimCache() {
+    while (this.chats.size > this.maxCachedChats || this.cachedBytes > this.maxCacheBytes) {
+      const key = this.chats.keys().next().value;
+      if (key === undefined) break;
+      this.cachedBytes -= this.cacheSizes.get(key) || 0;
+      this.cacheSizes.delete(key); this.chats.delete(key);
+    }
+  }
+
+  #save(state) {
+    let bytes;
+    try { bytes = saveChat(this.messagesDir, state, this.maxArchiveBytes); }
+    catch (error) {
+      // Mutators update the working object before writing. On ENOSPC/EACCES or
+      // rename failure, discard it so replay deduplication sees only disk state.
+      // Keeping a failed append cached would let the durable inbox acknowledge
+      // an event whose sourceEventKey had never reached the message archive.
+      if (this.chats.has(state.chatKey)) {
+        this.cachedBytes -= this.cacheSizes.get(state.chatKey) || 0;
+        this.cacheSizes.delete(state.chatKey); this.chats.delete(state.chatKey);
+      }
+      throw error;
+    }
+    if (this.chats.has(state.chatKey)) {
+      this.cachedBytes += bytes - (this.cacheSizes.get(state.chatKey) || 0);
+      this.cacheSizes.set(state.chatKey, bytes); this.#trimCache();
+    }
+  }
+
+  #discoverChats() {
+    // Listing archives does not parse or cache every historical JSON file.
     try {
-      const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f));
+      const files = fs.readdirSync(this.messagesDir).filter((f) => /^(group|private)_\d+\.json$/.test(f));
       for (const f of files) {
         const m = /^(group|private)_(\d+)\.json$/.exec(f);
-        if (m) this.#state(`${m[1]}:${m[2]}`);
+        if (m) this.knownChats.add(`${m[1]}:${m[2]}`);
       }
     } catch { /* 目录不存在 */ }
-    return [...this.chats.keys()];
   }
+
+  listChats({ limit = 2000, offset = 0 } = {}) {
+    this.#discoverChats();
+    const start = Math.max(0, Math.floor(Number(offset) || 0));
+    return [...this.knownChats].slice(start, start + Math.min(2000, Math.max(1, Math.floor(Number(limit) || 2000))));
+  }
+  chatCount() { this.#discoverChats(); return this.knownChats.size; }
 
   getChatMeta(chatKey) {
     const st = this.#state(chatKey);
@@ -78,7 +161,7 @@ export class ChatStore {
   }
 
   /** 追加一条收到的消息（未读）。返回写入的条目。 */
-  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [], isPoke = false }) {
+  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [], isPoke = false, sourceEventKey = null }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -92,11 +175,12 @@ export class ChatStore {
       reply: reply || null,
       media: Array.isArray(media) ? media : [],
       // 拍一拍事件：可作触发批（resolveContextTier 按 1 档响应），但不进【过去状态】
-      isPoke: Boolean(isPoke)
+      isPoke: Boolean(isPoke),
+      ...(sourceEventKey == null || sourceEventKey === '' ? {} : { sourceEventKey: String(sourceEventKey) })
     };
     st.messages.push(entry);
     this.#trim(st);
-    saveChat(st);
+    this.#save(st);
     return entry;
   }
 
@@ -117,7 +201,7 @@ export class ChatStore {
     };
     st.messages.push(entry);
     this.#trim(st);
-    saveChat(st);
+    this.#save(st);
     return entry;
   }
 
@@ -126,7 +210,7 @@ export class ChatStore {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read && !m.self);
     for (const m of st.messages) m.read = true;
-    saveChat(st);
+    this.#save(st);
     return unread;
   }
 
@@ -146,7 +230,7 @@ export class ChatStore {
     for (const m of st.messages) {
       if (!m.read && !m.self) { m.read = true; n++; }
     }
-    if (n) saveChat(st);
+    if (n) this.#save(st);
     return n;
   }
 
@@ -167,7 +251,7 @@ export class ChatStore {
       if (m.self) continue;
       if (m.read && m.ts >= winStart && m.ts <= winEnd) { m.read = false; n++; }
     }
-    if (n) saveChat(st);
+    if (n) this.#save(st);
     return n;
   }
 
@@ -196,6 +280,12 @@ export class ChatStore {
     return st.messages.find((m) => String(m.mid) === target) || null;
   }
 
+  findBySourceEventKey(chatKey, sourceEventKey) {
+    if (sourceEventKey == null || sourceEventKey === '') return null;
+    const target = String(sourceEventKey);
+    return this.#state(chatKey).messages.find(message => message.sourceEventKey === target) || null;
+  }
+
   /**
    * 标记一条消息已被用户撤回（按 QQ 消息 id）。
    * 撤回的消息后续不再发给大模型（buildPastState 会过滤 recalled）。
@@ -208,7 +298,7 @@ export class ChatStore {
     if (!m) return false;
     m.recalled = true;
     m.read = true;   // 撤回的消息也算"已读"，不再触发回复
-    saveChat(st);
+    this.#save(st);
     return true;
   }
 
@@ -230,7 +320,7 @@ export class ChatStore {
         if (x && x.url && !seen.has(x.url)) { m.media.push(x); seen.add(x.url); }
       }
     }
-    saveChat(st);
+    this.#save(st);
     return true;
   }
 
@@ -251,7 +341,7 @@ export class ChatStore {
     const before = st.messages.length;
     st.messages = st.messages.filter((m) => !ids.has(m.id));
     const removed = before - st.messages.length;
-    if (removed) saveChat(st);
+    if (removed) this.#save(st);
     return removed;
   }
 
@@ -264,7 +354,7 @@ export class ChatStore {
     const removed = st.messages.length;
     if (removed) {
       st.messages = [];
-      saveChat(st);
+      this.#save(st);
     }
     return removed;
   }
@@ -298,5 +388,40 @@ export class ChatStore {
     if (this.maxPerChat > 0 && st.messages.length > this.maxPerChat) {
       st.messages.splice(0, st.messages.length - this.maxPerChat);
     }
+  }
+
+  close() { this.chats.clear(); this.cacheSizes.clear(); this.knownChats.clear(); this.cachedBytes = 0; }
+}
+
+/** Auto never rewrites legacy history. Switching an existing JSON archive is an
+ * explicit offline `node scripts/message-storage.mjs migrate --data-dir ...`.
+ * A rollback marker takes precedence over a retained SQLite backup. */
+export function resolveStorageBackend(dataDir, requested = 'auto') {
+  if (!['auto', 'json', 'sqlite'].includes(requested)) throw new Error(`未知消息存储后端：${requested}`);
+  if (requested !== 'auto') return requested;
+  const stateFile = path.join(dataDir, STORAGE_STATE_FILE);
+  if (fs.existsSync(stateFile)) {
+    let state;
+    try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); }
+    catch (error) { throw new Error(`消息存储选择文件损坏：${error.message}`); }
+    if (!['json', 'sqlite'].includes(state.backend)) throw new Error('消息存储选择文件包含未知后端');
+    if (state.backend === 'sqlite' && !fs.existsSync(path.join(dataDir, SQLITE_FILE))) {
+      throw new Error('消息存储已切换到 SQLite，但数据库不存在。请恢复备份，拒绝创建空数据库。');
+    }
+    return state.backend;
+  }
+  if (fs.existsSync(path.join(dataDir, SQLITE_FILE))) return 'sqlite';
+  try {
+    if (fs.readdirSync(path.join(dataDir, 'messages')).some(file => /\.json$/i.test(file))) return 'json';
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return sqliteAvailable() ? 'sqlite' : 'json';
+}
+
+export class ChatStore {
+  constructor(maxPerChat = 0, options = {}) {
+    const dataDir = options.dataDir || DATA_DIR;
+    const requested = options.backend || process.env.QQ_AGENT_STORE_BACKEND || getConfig().store?.backend || 'auto';
+    const backend = resolveStorageBackend(dataDir, requested);
+    return backend === 'sqlite' ? new SQLiteChatStore(maxPerChat, { ...options, dataDir }) : new JSONChatStore(maxPerChat, { ...options, dataDir });
   }
 }

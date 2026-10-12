@@ -8,8 +8,8 @@
 // 热重载会加载出半截代码；而且覆盖会静默吞掉用户自己改过的文件。
 import fs from 'node:fs';
 import path from 'node:path';
-import { SKILLS_DIR, PLUGINS_DIR } from './plugin-loader.js';
-import { unzipToModuleDir, parseZip } from './zip-install.js';
+import { SKILLS_DIR, PLUGINS_DIR, prepareExtensionRoots } from './plugin-loader.js';
+import { unzipToModuleDir, parseZip, MAX_ZIP_BYTES } from './zip-install.js';
 
 const BANNED_EXT = /\.(exe|dll|bat|cmd|com|msi|scr|ps1|vbs|sh|lnk)$/i;
 const SKIP_DIR = new Set(['node_modules', '.git', '.svn', '__pycache__', '.DS_Store']);
@@ -27,8 +27,8 @@ function safeDirName(name, fallback = 'module') {
 /** 目标目录未占用时才用原名，否则递增 _1/_2… */
 function allocateDir(baseDir, name) {
   let finalName = name;
-  for (let n = 1; n <= 100; n++) {
-    if (!fs.existsSync(path.join(baseDir, finalName))) break;
+  for (let n = 1; fs.existsSync(path.join(baseDir, finalName)); n++) {
+    if (n > 100) throw new Error('同名扩展过多，请先清理重复安装');
     finalName = `${name}_${n}`;
   }
   return finalName;
@@ -57,6 +57,7 @@ const dirOf = (kind) => (kind === 'plugin' ? PLUGINS_DIR : SKILLS_DIR);
  * @returns {Promise<{ kind, id, dir, files }>}
  */
 export async function importZip(buffer, { kind = 'skill', preferId = '' } = {}) {
+  prepareExtensionRoots();
   const entries = parseZip(buffer);          // 内含路径穿越/后缀/数量/体积校验
   const detected = detectKind(entries.map((e) => e.name), kind);
   const baseDir = dirOf(detected);
@@ -71,17 +72,20 @@ export async function importZip(buffer, { kind = 'skill', preferId = '' } = {}) 
  * @param {{ kind?: string }} o
  */
 export function importPath(src, { kind = 'skill' } = {}) {
+  prepareExtensionRoots();
   if (!src || typeof src !== 'string') throw new Error('缺少路径');
   const abs = path.resolve(src);
   const stat = fs.statSync(abs);            // 不存在/无权限 → 抛错，由路由转成 400
 
   if (stat.isFile() && /\.zip$/i.test(abs)) {
+    if (stat.size > MAX_ZIP_BYTES) throw new Error('安装包超过 8MB 上限');
     return importZip(fs.readFileSync(abs), { kind, preferId: safeDirName(abs, '') });
   }
 
   // 单文件（skill.json / index.js …）：包一层以文件名命名的目录，
   // 否则装进去就是散落在 skills/ 根目录里的孤儿文件，永远不会被扫描到。
   if (stat.isFile()) {
+    if (stat.size > MAX_TOTAL) throw new Error('文件总大小超过 64MB');
     if (BANNED_EXT.test(abs)) throw new Error(`不支持的文件类型：${path.basename(abs)}`);
     const detected = detectKind([path.basename(abs)], kind);
     const baseDir = dirOf(detected);
@@ -95,20 +99,24 @@ export function importPath(src, { kind = 'skill' } = {}) {
 
   // 目录：先整棵扫一遍（順便校验），再复制
   const collected = [];
+  let total = 0;
   const walk = (dir, rel) => {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
       if (SKIP_DIR.has(ent.name)) continue;
+      if (ent.isSymbolicLink()) throw new Error(`不支持导入符号链接：${ent.name}`);
       const relPath = rel ? `${rel}/${ent.name}` : ent.name;
       if (ent.isDirectory()) { walk(path.join(dir, ent.name), relPath); continue; }
       if (BANNED_EXT.test(ent.name)) throw new Error(`包含禁止的文件类型：${relPath}`);
       const st = fs.statSync(path.join(dir, ent.name));
+      total += st.size;
+      if (total > MAX_TOTAL) throw new Error('文件总大小超过 64MB');
+      if (collected.length >= MAX_FILES) throw new Error(`文件数量过多（>${MAX_FILES}）`);
       collected.push({ abs: path.join(dir, ent.name), rel: relPath, size: st.size });
     }
   };
   walk(abs, '');
   if (!collected.length) throw new Error('这个文件夹是空的');
   if (collected.length > MAX_FILES) throw new Error(`文件数量过多（${collected.length} > ${MAX_FILES}）`);
-  const total = collected.reduce((s, f) => s + f.size, 0);
   if (total > MAX_TOTAL) throw new Error('文件总大小超过 64MB');
 
   const detected = detectKind(collected.map((f) => f.rel), kind);
@@ -147,6 +155,7 @@ export async function importModules({ paths = [], zipBase64 = '', zipName = '', 
   }
   if (zipBase64) {
     try {
+      if (String(zipBase64).length > Math.ceil(MAX_ZIP_BYTES / 3) * 4) throw new Error('安装包超过 8MB 上限');
       const buffer = Buffer.from(String(zipBase64), 'base64');
       if (!buffer.length) throw new Error('内容为空');
       const r = await importZip(buffer, { kind, preferId: safeDirName(zipName, '') });

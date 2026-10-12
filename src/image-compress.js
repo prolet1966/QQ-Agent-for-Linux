@@ -11,22 +11,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { detectImageType, mimeToExt } from './image-type.js';
-import { spawn } from 'node:child_process';
+import { getConfig } from './config.js';
+import { runMediaProcess } from './media-process.js';
+import { mediaMaxBytes } from './media-resources.js';
 
 function run(cmd, args, timeoutMs = 20000) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (val) => { if (!done) { done = true; resolve(val); } };
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    } catch {
-      return finish(null);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(null); }, timeoutMs);
-    child.on('error', () => { clearTimeout(timer); finish(null); });
-    child.on('close', (code) => { clearTimeout(timer); finish(code === 0 ? true : null); });
-  });
+  return runMediaProcess(cmd, args, timeoutMs).then((r) => r ? true : null);
 }
 
 let _ffmpeg = null;
@@ -46,29 +36,11 @@ async function ensureFf() {
 
 /** 用 ffprobe 读图片尺寸。 */
 async function imageSize(ffprobe, filePath) {
-  const out = await new Promise((resolve) => {
-    let txt = '';
-    let child;
-    try {
-      child = spawn(ffprobe, ['-v', 'quiet', '-print_format', 'json', '-show_streams', filePath], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    } catch {
-      return resolve(null);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } resolve(null); }, 10000);
-    child.stdout.on('data', (d) => { txt += d; });
-    child.on('error', () => { clearTimeout(timer); resolve(null); });
-    child.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const j = JSON.parse(txt);
-        const s = (j.streams || []).find((x) => x.codec_type === 'video' || x.width);
-        resolve(s && s.width ? { width: Number(s.width), height: Number(s.height) } : null);
-      } catch {
-        resolve(null);
-      }
-    });
-  });
-  return out;
+  const result = await runMediaProcess(ffprobe, ['-v', 'quiet', '-print_format', 'json', '-show_streams', filePath], 10000);
+  try {
+    const s = (JSON.parse(result?.stdout || '').streams || []).find((x) => x.codec_type === 'video' || x.width);
+    return s?.width ? { width: Number(s.width), height: Number(s.height) } : null;
+  } catch { return null; }
 }
 
 /**
@@ -82,6 +54,8 @@ async function imageSize(ffprobe, filePath) {
  */
 export async function compressImage(buffer, { maxDim = 1568, maxBytes = 4 * 1024 * 1024, quality = 4 } = {}) {
   const mime = detectMime(buffer) || 'image/jpeg';
+  if (buffer.length > mediaMaxBytes()) throw new Error('图片超过媒体体积上限');
+  if (getConfig().resources?.localMedia === false) return { buffer, mime, compressed: false };
   // 小图直接过（字节数就很小，没必要压缩）
   if (buffer.length <= Math.min(maxBytes, 512 * 1024)) {
     return { buffer, mime, compressed: false };
@@ -108,9 +82,11 @@ export async function compressImage(buffer, { maxDim = 1568, maxBytes = 4 * 1024
       '-y', '-i', tmpIn,
       '-vf', `scale='min(${maxDim},iw)':'min(${maxDim},ih)':force_original_aspect_ratio=decrease`,
       '-q:v', String(quality),
+      '-threads', '1', '-fs', String(mediaMaxBytes()),
       tmpOut
     ], 25000);
     if (okRun && fs.existsSync(tmpOut)) {
+      if (fs.statSync(tmpOut).size > mediaMaxBytes()) return { buffer, mime, compressed: false };
       const compressed = fs.readFileSync(tmpOut);
       // 只有真的变小了才用压缩结果（否则保留原图）
       if (compressed.length && compressed.length < buffer.length) {

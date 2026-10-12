@@ -15,10 +15,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
 import { DATA_DIR, getConfig } from './config.js';
 import { safeFetchBinaryToFile } from './safe-fetch.js';
 import { skillManager } from './skills/manager.js';
+import { runMediaProcess } from './media-process.js';
+import { mediaMaxBytes, mediaWork, pruneMediaCache } from './media-resources.js';
 
 /** 允许的抽帧模式取值（配置写错时回退 auto）。 */
 export const VIDEO_MODES = ['auto', 'native', 'frames', 'off'];
@@ -63,38 +64,12 @@ export function resolveVideoRoute({ mode = 'auto', videoModel = '', framesOk = f
 
 /** 调外部命令并收集 stdout（带超时）。 */
 function run(cmd, args, timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    let out = '';
-    let done = false;
-    const finish = (val) => { if (!done) { done = true; resolve(val); } };
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    } catch {
-      return finish(null);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(null); }, timeoutMs);
-    child.stdout.on('data', (d) => { out += d; });
-    child.on('error', () => { clearTimeout(timer); finish(null); });
-    child.on('close', () => { clearTimeout(timer); finish(out || null); });
-  });
+  return runMediaProcess(cmd, args, timeoutMs).then((r) => r?.stdout || null);
 }
 
 /** 调外部命令，只看退出码（带超时）。转码这类"不关心 stdout"的命令用它。 */
 function runExitOk(cmd, args, timeoutMs = 60000) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
-    } catch {
-      return finish(false);
-    }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(false); }, timeoutMs);
-    child.on('error', () => { clearTimeout(timer); finish(false); });
-    child.on('close', (code) => { clearTimeout(timer); finish(code === 0); });
-  });
+  return runMediaProcess(cmd, args, timeoutMs).then(Boolean);
 }
 
 /** 探测 ffprobe / ffmpeg 是否可用（缓存结果；都没找到时 60 秒后允许重探）。 */
@@ -128,6 +103,7 @@ export class VideoReader {
 
   /** 抽帧能力是否可用（Skill 生效 + ffmpeg 存在）。 */
   async framesAvailable() {
+    if (getConfig().resources?.localMedia === false) return false;
     // 统一问 video-frames 能力"这条路现在走得通吗"。
     // 不要在这里再探测一遍 ffmpeg —— 技能里已有一份判断，两份实现迟早不一致
     // （例如技能支持自定义 ffmpeg 路径，这里却不知道，于是界面说不可用、实际能用）。
@@ -167,6 +143,14 @@ export class VideoReader {
   async probe(media, { count = 0 } = {}) {
     const cfg = getConfig();
     const out = { note: '', route: 'meta', routeReason: '' };
+    if (cfg.resources?.localMedia === false) {
+      const route = resolveVideoRoute({ mode: cfg.api?.videoMode, videoModel: cfg.api?.videoModel, hasUrl: /^https?:\/\//i.test(String(media?.url || '')), framesOk: false });
+      out.route = route.route;
+      out.routeReason = `${route.reason}；服务器本地媒体处理已关闭`;
+      if (route.route === 'native') out.nativeUrl = String(media.url);
+      out.note = route.route === 'native' ? '视频 URL 已交给远程模型处理；服务器不下载或转码。' : out.routeReason;
+      return out;
+    }
 
     // 1. 拿到视频文件（本地缓存优先，其次下载 url）
     const filePath = await this.#localize(media).catch(() => null);
@@ -259,7 +243,7 @@ export class VideoReader {
     if (!providers.length) return { frames: [], times: [], error: '抽帧 Skill 未启用' };
     for (const p of providers) {
       try {
-        const r = await p.fn({ filePath, count: count || undefined, durationSec });
+        const r = await mediaWork.run(() => p.fn({ filePath, count: Math.min(8, count || 4), durationSec }));
         if (r && Array.isArray(r.frames) && r.frames.length) {
           return { frames: r.frames, times: r.times || [] };
         }
@@ -293,14 +277,16 @@ export class VideoReader {
         '-vf', "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=24",
         '-an',                       // 聊天视频的画面理解不需要音轨
         '-c:v', 'libx264',
+        '-threads', '1',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
-        '-fs', '20M',
+        '-t', '120', '-fs', String(mediaMaxBytes(20 * 1024 * 1024)),
         tmpOut
       ], 120000);
       if (!okRun || !fs.existsSync(tmpOut)) return null;
+      if (fs.statSync(tmpOut).size > mediaMaxBytes(20 * 1024 * 1024)) return null;
       const out = fs.readFileSync(tmpOut);
-      if (!out.length || out.length > 20 * 1024 * 1024) return null;
+      if (!out.length || out.length > mediaMaxBytes(20 * 1024 * 1024)) return null;
       return `data:video/mp4;base64,${out.toString('base64')}`;
     } catch {
       return null;
@@ -312,14 +298,14 @@ export class VideoReader {
   /** 把视频落地为本地文件路径（OneBot 缓存 → 下载 url）。 */
   async #localize(media) {
     // 路径 0：消息里直接给了本地 path
-    if (media.path && fs.existsSync(String(media.path))) return String(media.path);
+    if (media.path && fs.existsSync(String(media.path)) && fs.statSync(String(media.path)).size <= mediaMaxBytes(200 * 1024 * 1024)) return String(media.path);
     // 路径 1：OneBot get_video / get_file 拿缓存
     if (media.file) {
       for (const action of ['get_video', 'get_file', 'get_image']) {
         try {
           const ret = await this.onebot.call(action, { file: String(media.file) });
           const p = ret?.file && fs.existsSync(String(ret.file)) ? String(ret.file) : '';
-          if (p) return p;
+          if (p && fs.statSync(p).size <= mediaMaxBytes(200 * 1024 * 1024)) return p;
           if (ret?.url) {
             const dl = await this.#download(String(ret.url));
             if (dl) return dl;
@@ -340,8 +326,9 @@ export class VideoReader {
       // 走 safe-fetch：url 来自 OneBot 媒体段（发送方可影响），裸 fetch 会变成 SSRF 通道。
       // 流式落盘（safeFetchBinaryToFile）：整读 200MB 进内存再写盘，多视频并发
       // 时进程直接被顶爆；边收边写盘后内存占用与视频大小无关（2026-09-19 M8）。
-      const maxBytes = 200 * 1024 * 1024;   // 视频上限 200MB
+      const maxBytes = mediaMaxBytes(200 * 1024 * 1024);
       fs.mkdirSync(videoCacheDir(), { recursive: true });
+      pruneMediaCache(videoCacheDir());
       // 文件名带随机后缀：同毫秒并发下载不能互相覆盖
       const dest = path.join(videoCacheDir(), `v_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}.mp4`);
       // 超限/截断语义与旧实现一致：safeFetchBinaryToFile 在累计字节到达 maxBytes

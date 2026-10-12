@@ -1,0 +1,20 @@
+[Unit]
+Description=QQ Agent temporary QQ login display (15 minutes)
+After=qq-agent-qq.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+Environment=HOME=@HOME@
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/bash @INSTALL_ROOT@/current/scripts/server/temporary-desktop.sh
+RuntimeMaxSec=15min
+TimeoutStopSec=5s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# No Install section: this service is deliberately never enabled at boot.

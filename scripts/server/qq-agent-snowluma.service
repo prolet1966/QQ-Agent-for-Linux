@@ -1,0 +1,31 @@
+[Unit]
+Description=QQ Agent SnowLuma protocol endpoint (optional)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@SNOWLUMA_DIR@
+Environment=HOME=@HOME@
+Environment=DISPLAY=:99
+ExecStart=@SNOWLUMA_NODE@ @INSTALL_ROOT@/current/scripts/server/snowluma-launcher.mjs
+Restart=on-failure
+RestartSec=8s
+TimeoutStopSec=30s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@SNOWLUMA_DIR@
+# ptrace is granted only to this unit when the native QQ hook requires it;
+# never disable kernel.yama.ptrace_scope globally.
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=CAP_SYS_PTRACE
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ExecStartPre=@SNOWLUMA_NODE@ -e "if(process.versions.node!=='22.13.0')process.exit(1)"
+
+[Install]
+WantedBy=multi-user.target

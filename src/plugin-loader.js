@@ -30,6 +30,7 @@ import { registerTool, unregisterTool, unregisterToolsBySkill, getTool, listTool
 import { skillManager } from './skills/manager.js';
 import { normalizeManifest, isManifestUsable, SKILL_API_VERSION, kindOfDir } from './skills/manifest.js';
 import { skillErrorText } from './skills/errors.js';
+import { DATA_DIR } from './config.js';
 
 // ⚠️ 必须以**模块自身位置**为锚点，不能用 process.cwd()。
 // 打包/安装版里 App 文件在 <install>/resources/app/，而快捷方式的"起始位置"
@@ -40,8 +41,38 @@ const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 // 导出两个根目录：routes.js 的"删除模块"接口要据此校验
 // "目标目录确实在 skills/ 或 plugins/ 之内"，必须与加载器共用同一份路径，
 // 否则校验口径会与实际加载位置分叉（自定义 roots 时尤其危险）。
-export const SKILLS_DIR = path.resolve(APP_ROOT, 'skills');
-export const PLUGINS_DIR = path.resolve(APP_ROOT, 'plugins');
+// 用户选择的扩展属于数据，升级或只读 /opt 安装不能覆盖它们。
+export const EXTENSIONS_DIR = path.join(DATA_DIR, 'extensions');
+export const SKILLS_DIR = path.join(EXTENSIONS_DIR, 'skills');
+export const PLUGINS_DIR = path.join(EXTENSIONS_DIR, 'plugins');
+
+/**
+ * 老扩展会 import ../../src/config.js。用重导出桥接到同一份应用模块，
+ * 避免复制核心源码后产生第二份配置/注册表单例，也无需 /opt 写权限。
+ */
+export function prepareExtensionRoots() {
+  fs.mkdirSync(SKILLS_DIR, { recursive: true });
+  fs.mkdirSync(PLUGINS_DIR, { recursive: true });
+  const writeChanged = (file, content) => {
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === content) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content, 'utf8');
+  };
+  writeChanged(path.join(EXTENSIONS_DIR, 'package.json'), '{"private":true,"type":"module"}\n');
+  const sourceRoot = path.join(APP_ROOT, 'src');
+  const walk = (dir, relative = '') => {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = path.join(relative, item.name);
+      const source = path.join(dir, item.name);
+      if (item.isDirectory()) walk(source, rel);
+      else if (item.isFile() && item.name.endsWith('.js')) {
+        writeChanged(path.join(EXTENSIONS_DIR, 'src', rel),
+          `// Generated compatibility bridge; QQ Agent owns this file.\nexport * from ${JSON.stringify(pathToFileURL(source).href)};\n`);
+      }
+    }
+  };
+  walk(sourceRoot);
+}
 
 /**
  * 旧插件清单的 prompt 是 `{ when, examples[], instruction }` 形态，
@@ -260,6 +291,22 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
   // 旧 plugin.json 的 prompt 形态 → 新 prompt.sections，避免旧插件提示词静默失效
   adaptLegacyPrompt(found.raw, manifest);
 
+  // 禁用时只读取清单。import 本身就能运行顶层代码，不能靠 setup 内的
+  // enabled 判断阻止定时器、联网或 Electron 依赖的副作用。
+  if (!skillManager.isEnabledManifest(manifest)) {
+    const skill = {
+      manifest, source: found.source, dir,
+      relDir: path.relative(DATA_DIR, dir).replace(/\\/g, '/'), kind,
+      codeLoaded: false, loadError: null, api: null, toolIds: [],
+      hooks: {}, providers: {}, activate: null, deactivate: null,
+      dispose: () => unregisterToolsBySkill(manifest.id)
+    };
+    skillManager.register(skill);
+    skillManager.errors.delete(manifest.id);
+    log(`[skill] 已禁用，仅读取清单：${manifest.name}（${manifest.id}）`);
+    return { dir, loaded: true, disabled: true, id: manifest.id, skill };
+  }
+
   // 入口：skill.json 用 entry，旧 plugin.json 也是 entry；默认 index.js
   const entryRel = String(found.raw.entry || 'index.js');
   // ⚠️ entry 必须锁死在 Skill 自己的目录内。
@@ -419,7 +466,7 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
     source: found.source,
     dir,
     // 仓库相对目录 + 目录语义类型，供状态视图/UI/审计使用
-    relDir: path.relative(APP_ROOT, dir).replace(/\\/g, '/'),
+    relDir: path.relative(DATA_DIR, dir).replace(/\\/g, '/'),
     // 目录语义类型：'plugin'（确定性型）/ 'skill'（LLM 型）/ null（自定义根，不判定）
     kind,
     api: apiWithCollect,
@@ -446,6 +493,7 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
     clearFreePool: typeof mod.clearFreePool === 'function' ? mod.clearFreePool : null
   };
   skill.loadError = null;
+  skill.codeLoaded = true;
 
   const r = skillManager.register(skill);
   if (!r.ok) {
@@ -495,8 +543,11 @@ async function loadSkillRoot(rootDir, { log = console.log, label = 'skill' } = {
  * 幂等：重复调用会重新加载并覆盖同 id 的 Skill（热重载依赖这个语义）。
  */
 export async function loadPlugins({ log = console.log, roots = null } = {}) {
+  if (!roots) prepareExtensionRoots();
   const skillsRoot = roots?.skills ? path.resolve(roots.skills) : SKILLS_DIR;
   const pluginsRoot = roots?.plugins ? path.resolve(roots.plugins) : PLUGINS_DIR;
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  fs.mkdirSync(pluginsRoot, { recursive: true });
   skillManager.setLog(log);
   const skillRes = await loadSkillRoot(skillsRoot, { log, label: 'skill' });
   const pluginRes = await loadSkillRoot(pluginsRoot, { log, label: 'plugin' });
